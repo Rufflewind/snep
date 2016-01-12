@@ -3,11 +3,10 @@ from __future__ import print_function, unicode_literals
 import os, re, subprocess, sys
 from util import *
 
-#@begin utils
-#@set remote = https://github.com/Rufflewind/snep/utils.py
-def test_function():
-    pass
-#@end
+try:
+    import urllib.parse as urllib_parse
+except ImportError:
+    import urlparse
 
 class Config(object):
 
@@ -55,26 +54,43 @@ def detect_syntax_names(config, path, indexedLines):
         return ()
     return (syntax_names.pop(),)
 
-def parse_path(path):
-    protocols = {
-        "file://",
-        "ssh://",
-        "git://",
-        "git+?.*://",
-    }
-    m = re.match(r"[\w+]+://", path)
-    if m:
-        protocol = m.group(0)
+def parse_path(uri):
+    result = urllib_parse.urlsplit(uri, scheme="file", allow_fragments=False)
+    scheme = result.scheme
+    netloc = result.netloc
+    path = result.path
+    if result.query or uri.endswith("?"):
+        path += "?" + result.query
+
+    # https://foobar/foo#snip=snip1
+    # git+https://alpha/foo#rev=HEAD&path=myfile.txt&snip=snip1
+
+    if scheme == "file":
+
+    urlparse.urlunsplit(parts)
+
+    protocols = [
+        "file",
+        "ssh",
+        "git(+\w+)?",
+    ]
+    m = re.match(r"([+\w]+):(.*)", path)
+    if not m:
+        protocol = "file"
     else:
-        protocol = "file://"
+        scheme, path = m.groups()
+
+    m = re.match(r"//(.*)", path)
+    if m:
+        path, = m.groups()
+
+
     "://github.com/foo/bar.git:b/master:dir/file:snippet1"
 
-def parse_directives(indexed_lines, syntax):
-    comment_syntaxes = syntax.comment_syntaxes
+def parse_directives(indexed_lines, syntaxes):
     for i, line in indexed_lines:
-        for comment_syntax in comment_syntaxes:
-            pattern = ("\s*" + comment_syntax[0] + "(.*)" +
-                       comment_syntax[1] + "\s*$")
+        for syntax in syntaxes:
+            pattern = "\s*" + syntax[0] + "(.*)" + syntax[1] + "\s*$"
             m = re.match(pattern, line)
             if m:
                 yield i, "directive", m.group(1).strip()
@@ -139,17 +155,19 @@ def parse_snippet(indexed_directive_lines, name=""):
             assert False
     return snippet
 
-def ls(path):
+def ls(config, args):
+    path = args.PATH
     with open(path, "rt") as f:
         indexed_lines = enumerate(read_every_line(f))
-        syntax = LANGUAGE_INFO.detect_language(path, indexed_lines)
-        indexed_directive_lines = parse_directives(indexed_lines, syntax)
+        syntaxes = detect_syntax_names(config, path, indexed_lines)
+        indexed_directive_lines = parse_directives(indexed_lines, syntaxes)
         snippet = parse_snippet(indexed_directive_lines)
         snippet.repack()
         for child in snippet.children:
-            print(child)
+            print("1", child)
 
-def rm(path):
+def rm(config, args):
+    path = args.PATH
     print("rm", path)
 
 def nonempty_lines(s):
@@ -176,9 +194,9 @@ def config_from_file(filename):
     return c
 
 def load_config():
-    return load_config("snep.conf")
+    return config_from_file("snep.conf")
 
-def options():
+def parse_args():
     import argparse
     p = argparse.ArgumentParser(
         description="A basic snipulator.",
@@ -190,21 +208,21 @@ def options():
 
     spp = sp.add_parser("ls", help="list snippets")
     spp.add_argument("PATH", help="path to file and/or snippet")
-    spp.set_defaults(func=lambda args: ls(args.PATH))
+    spp.set_defaults(func=ls)
 
     spp = sp.add_parser("rm", help="remove snippet(s)")
     spp.add_argument("PATH", help="path to file and/or snippet")
-    spp.set_defaults(func=lambda args: rm(args.PATH))
+    spp.set_defaults(func=rm)
 
-    return p
+    return p.parse_args()
 
 def main():
-    p = options()
-    if len(sys.argv) == 1:
+    args = parse_args()
+    func = getattr(args, "func")
+    if not func:
         p.print_usage()
         exit(1)
-    a = p.parse_args()
-    a.func(load_config(), a)
+    func(load_config(), args)
 
 if __name__ == "__main__":
     main()
