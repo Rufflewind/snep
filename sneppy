@@ -1,0 +1,257 @@
+#!/usr/bin/env python
+from __future__ import print_function, unicode_literals
+import re, sys
+
+class ParseError(Exception):
+    def __init__(self, src, row, msg):
+        self.src = src
+        self.row = row
+        self.msg = msg
+
+def json_canonical(data, ensure_ascii=False, sort_keys=True, **kwargs):
+    import json
+    return json.dumps(
+        data,
+        ensure_ascii=ensure_ascii,
+        sort_keys=sort_keys,
+        **kwargs
+    )
+
+def json_pretty(data):
+    return json_canonical(data, indent=4, separators=(",", ": "))
+
+def parse_directives(indexed_lines, src):
+    for i, line in indexed_lines:
+        m = re.match("\s*#@\s*(.*)", line.rstrip("\n"))
+        if not m:
+            yield i, "line", line
+            continue
+        directive, = m.groups()
+        directive = directive.rstrip()
+        if not directive:
+            continue
+        if directive == "]":
+            yield i, "end", None
+            continue
+        m = re.match("([^[:\s]+)\s*([[:])\s*(.*)", directive)
+        if not m:
+            raise ParseError(src, i, "invalid directive: " + line.rstrip())
+        key, sep, val = m.groups()
+        if sep == ":":
+            yield i, "attr", (key, val)
+        elif sep == "[":
+            if val:
+                raise ParseError(src, i,
+                                 "trailing garbage after '[': " + line.rstrip())
+            yield i, "begin", key
+        else:
+            assert False
+
+'''
+JSON data structure of nodes:
+
+    node = text_node | attr | elem
+    text = "some_text\n"
+    attr = ["attr_name", "attr_value"]
+    elem = ["elem_name", [node, ...]]
+    doc = [node, ...]
+
+'''
+
+def make_elem(name, children = None):
+    return [name, [] if children is None else children]
+
+def parse_doc(src):
+    with open(src, "rt") as f:
+        root_elem = make_elem("")
+        elem = root_elem
+        stack = []
+        for i, cmd, data in parse_directives(enumerate(f, 1), src):
+            if cmd == "line":
+                elem[1].append(data)
+            elif cmd == "attr":
+                elem[1].append(list(data))
+            elif cmd == "begin":
+                new_elem = make_elem(data)
+                elem[1].append(new_elem)
+                stack.append(elem)
+                elem = new_elem
+            elif cmd == "end":
+                try:
+                    elem = stack.pop()
+                except IndexError:
+                    raise ParseError(src, i, "unmatched ']'")
+            else:
+                assert False
+    if stack:
+        raise ParseError(src, i, "unclosed '['")
+    return root_elem[1]
+
+def render_doc_recursor(out, node):
+    if isinstance(node, str): # text
+        out.append(node)
+    elif isinstance(node, list):
+        key, val = node
+        if len(out) and not out[-1].endswith("\n"):
+            # make sure there's a newline before appending directive
+            out.append("\n")
+        if isinstance(val, str): # attribute
+            out.append("#@{0}: {1}\n".format(key, val))
+        elif isinstance(val, list): # element
+            out.append("#@{0}[\n".format(key))
+            for subnode in val:
+                render_doc_recursor(out, subnode)
+            out.append("#@]\n")
+        else:
+            raise ValueError("invalid node value: " + repr(val))
+    else:
+        raise ValueError("invalid node: " + repr(node))
+
+def render_doc(doc):
+    out = []
+    for elem in doc:
+        render_doc_recursor(out, elem)
+    return "".join(out)
+
+def ls(in_fn):
+    doc = parse_doc(in_fn)
+    print(json_pretty(doc))
+
+def get_attrs(nodes):
+    attrs = {}
+    for node in nodes:
+        if isinstance(node, list) and isinstance(node[1], str):
+            key, val = node
+            elem[key] = (elem[key] + "\n" if key in elem else "") + val
+    return attrs
+
+def get_elems(nodes):
+    '''{"elem_name": [elem, ...], ...}'''
+    elems = {}
+    for node in nodes:
+        if isinstance(node, list) and isinstance(node[1], list):
+            key, val = node
+            if key in elems:
+                elems[key].append(val)
+            else:
+                elems[key] = [val]
+    return elems
+
+def toposort_getnumdeps(numdeps_dict, graph, node_id):
+    numdeps = numdeps_dict.get(node_id, None)
+    if numdeps is None:
+        deps = graph[node_id]
+        numdeps = sum(toposort_getnumdeps(numdeps_dict, graph, subnode_id)
+                       for subnode_id in deps) + len(deps)
+        numdeps_dict[node_id] = numdeps
+    return numdeps
+
+def toposort_sortnodes(graph, nodes):
+    '''Sort nodes by the number of immediate dependencies, followed by the
+    node IDs themselves.'''
+    return sorted(nodes, key=(lambda node: (len(graph[node]), node)))
+
+def toposort_countrdeps(graph):
+    '''Count the number of immediate dependents (reverse dependencies).
+    Returns a dict that maps nodes to number of dependents, as well as a list
+    of roots (nodes with no dependents).'''
+    numrdeps = {}
+    for node, deps in graph.items():
+        for dep in deps:
+            numrdeps[dep] = numrdeps.get(dep, 0) + 1
+    roots = []
+    for node, deps in graph.items():
+        if node not in numrdeps:
+            numrdeps[node] = 0
+            roots.append(node)
+    return numrdeps, roots
+
+def map_dictvalues(func, d):
+    return dict((k, func(v)) for k, v in d.items())
+
+def toposort(graph):
+    '''graph = {node: [node, ...], ...}
+    Each entry consists of a key, which represents the node, and a value,
+    which is an iterable of nodes that form the dependencies of the key node.
+
+    The results are always deterministic.  However, to achieve this, nodes are
+    required to form a total ordering.'''
+
+    # make sure there are no duplicate edges
+    graph = map_dictvalues(set, graph)
+
+    # count the number of dependents and extract the roots
+    numrdeps, roots = toposort_countrdeps(graph)
+
+    # sort nodes to ensure a deterministic topo-sorted result; current algo
+    # sorts by # of immediate dependencies followed by node ID, so nodes with
+    # fewer immediate dependencies and/or lower node IDs tend to come first
+    roots = toposort_sortnodes(graph, roots)
+    graph = map_dictvalues(lambda deps: toposort_sortnodes(graph, deps), graph)
+
+    # Kahn's algorithm
+    # (note: this will alter numrdeps and roots)
+    result = []
+    while roots:
+        node1 = roots.pop()
+        result.append(node1)
+        for node2 in graph[node1]:
+            numrdeps[node2] -= 1
+            if not numrdeps[node2]:
+                roots.append(node2)
+    if len(result) != len(graph):
+        raise ValueError("graph is cyclic")
+    result.reverse()
+    return result
+
+def sync(in_fn, out_fn, backup_fn, inline):
+    backup_fn = backup_fn or in_fn + ".bak"
+    doc = parse_doc(in_fn)
+    doc_requires = get_attrs(doc).get("requires", "").split()
+    slots = dict((k, v[0]) for k, v in get_elems(doc).items()
+                 if k.startswith("slot/"))
+    for requires in doc_requires:
+        _
+    #slots["slot/imports"]
+    print(json_pretty(list(slots.keys())))
+    if out_fn == in_fn:
+        raise Exception("OVERWRITING IS NOT SUPPORTED YET; YOU MUST ALSO SUPPLY -f FLAG")
+    if out_fn is None:
+        print(render_doc(doc))
+    else:
+        raise Exception("OUTPUT NOT SUPPORTED YET")
+
+def argparser():
+    import argparse
+    p = argparse.ArgumentParser()
+    sp = p.add_subparsers(help="subcommand")
+
+    spp = sp.add_parser("ls")
+    spp.add_argument("in_fn", metavar="filename")
+    spp.set_defaults(func=ls)
+
+    spp = sp.add_parser("sync")
+    spp.add_argument("in_fn", metavar="filename")
+    spp.add_argument("--in-place", "-i", dest="inplace", action="store_true")
+    spp.add_argument("--backup", dest="backup_fn")
+    spp.add_argument("--output", "-o", dest="out_fn")
+    spp.set_defaults(func=sync)
+
+    return p
+
+def main():
+    parser = argparser()
+    args = vars(parser.parse_args())
+    func = args.pop("func", None)
+    if not func:
+        parser.print_usage()
+        exit(1)
+    try:
+        func(**args)
+    except ParseError as e:
+        sys.stderr.write("{0}:{1}: {2}\n".format(e.src, e.row, e.msg))
+        sys.stderr.flush()
+        exit(1)
+
+if __name__ == "__main__":
+    main()
