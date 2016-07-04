@@ -54,6 +54,7 @@ def detect_syntax_names(config, path, indexedLines):
         return ()
     return (syntax_names.pop(),)
 
+'''
 def parse_path(uri):
     result = urllib_parse.urlsplit(uri, scheme="file", allow_fragments=False)
     scheme = result.scheme
@@ -86,6 +87,7 @@ def parse_path(uri):
 
 
     "://github.com/foo/bar.git:b/master:dir/file:snippet1"
+'''
 
 def parse_directives(indexed_lines, syntaxes):
     for i, line in indexed_lines:

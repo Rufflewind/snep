@@ -1,0 +1,164 @@
+#!/usr/bin/env python
+from __future__ import print_function, unicode_literals
+import os, re, sys
+sys.path.insert(0, os.path.realpath(
+    os.path.join(os.path.dirname(__file__), "../lib")))
+import snep
+import snep.utils as utils
+
+class BuiltinSnippet(object):
+
+    def __init__(self, type, name):
+        self.type = type
+        self.name = name
+        self.requires = frozenset()
+
+class Snippet(object):
+
+    def __init__(self, element):
+        self.type = None
+        self.name = element.name
+        self.requires = frozenset(
+            element.attributes.get("requires", "").split())
+        self.element = element
+
+    def __repr__(self):
+        return "Snippet({0!r})".format(self.element)
+
+def find_all_snippets(element):
+    snips = element.get_element("snips")
+    if not snips.has_unique_elements:
+        for name in snips.elements:
+            if name not in snips.unique_elements:
+                raise ValueError("non-unique element: {0}".format(name))
+        assert False
+    return map(Snippet, snips.unique_elements.values())
+
+def get_builtin_snippet(name):
+    args = name.split(":", 1)
+    if len(args) == 2:
+        return BuiltinSnippet(*args)
+
+class SnippetCache(object):
+
+    def __init__(self, search_path):
+        self.search_path_stack = list(reversed(search_path))
+        self.doc_cache = {}
+        self.snip_cache = {}
+
+    def get_snippet(self, name):
+        while True:
+            snip = self.snip_cache.get(name, None)
+            if snip is not None:
+                return snip
+            snip = get_builtin_snippet(name)
+            if snip is not None:
+                return snip
+            if not self.search_path_stack:
+                break
+            self._load_document(self.search_path_stack.pop())
+        raise ValueError("can't find snippet: {0}".format(name))
+
+    def _load_document(self, fn):
+        doc = self.get_document(fn)
+        for snip in find_all_snippets(doc):
+            if snip.name not in self.snip_cache:
+                self.snip_cache[snip.name] = snip
+
+    def get_document(self, fn):
+        fn = os.path.realpath(fn)
+        doc = self.doc_cache.get(fn, None)
+        if doc is None:
+            doc = snep.parse_doc(fn)
+            self.doc_cache[fn] = doc
+        return doc
+
+def get_deps(cache, requires):
+    def neighbors_func(dep):
+        return cache.get_snippet(dep).requires
+    return utils.reachable_set(requires, neighbors_func)
+
+def ls(in_fn):
+    doc = snep.parse_doc(in_fn)
+    sys.stdout.write(utils.json_pretty(doc.to_json()))
+
+def sync(in_fn, output, in_place):
+    if in_place:
+        out_file = utils.safe_open(in_fn, "w")
+    elif output is None:
+        out_file = sys.stdout
+    else:
+        out_file = utils.safe_open(output, "w")
+
+    search_path = os.environ["SNEP_PATH"].split(":")
+    search_path.append(in_fn)
+    cache = SnippetCache(search_path)
+
+    with out_file:
+
+        doc = snep.parse_doc(in_fn)
+        requires = Snippet(doc).requires
+        deps = get_deps(cache, requires)
+
+        mods = []
+        mod_deps = []
+        for dep in deps:
+            snip = get_builtin_snippet(dep)
+            if snip and snip.type == "mod":
+                mod_deps.append(dep)
+                mods.append(snip.name)
+        mods.sort()
+        deps.difference_update(mod_deps)
+
+        imps = []
+        for mod in mods:
+            imps.append(snep.Text("import {0}\n".format(mod)))
+
+        graph = dict((dep, [x for x in cache.get_snippet(dep).requires
+                            if not get_builtin_snippet(x)]) for dep in deps)
+        snip_names = utils.toposort(graph)
+        snips = []
+        for name in snip_names:
+            if snips:
+                snips.append(snep.Text("\n"))
+            snips.append(cache.get_snippet(name).element)
+
+        doc = doc.replace_element_children("imports", imps)
+        doc = doc.replace_element_children("snips", snips)
+
+        out_file.write(doc.render())
+
+def argparser():
+    import argparse
+    p = argparse.ArgumentParser()
+    sp = p.add_subparsers(help="subcommand")
+
+    spp = sp.add_parser("ls")
+    spp.add_argument("in_fn", metavar="filename")
+    spp.set_defaults(func=ls)
+
+    spp = sp.add_parser("sync")
+    spp.add_argument("in_fn", metavar="filename")
+    g = spp.add_mutually_exclusive_group()
+    g.add_argument("--in-place", "-i", action="store_true")
+    g.add_argument("--output", "-o")
+    spp.set_defaults(func=sync)
+
+    return p
+
+def main():
+    parser = argparser()
+    args = vars(parser.parse_args())
+    func = args.pop("func", None)
+    if not func:
+        parser.print_usage(sys.stderr)
+        exit(1)
+    try:
+        func(**args)
+    except snep.ParseError as e:
+        sys.stderr.write("{0}:{1}: {2}\n".format(e.src, e.row, e.msg))
+        sys.stderr.flush()
+        exit(1)
+
+if __name__ == "__main__":
+    main()
