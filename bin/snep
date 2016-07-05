@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 from __future__ import print_function, unicode_literals
-import os, re, sys
+import functools, os, re, sys
 sys.path.insert(0, os.path.realpath(
     os.path.join(os.path.dirname(__file__), "../lib")))
 import snep
@@ -46,6 +46,12 @@ def get_builtin_snippet(name):
     if len(args) == 2:
         return BuiltinSnippet(*args)
 
+def get_snippet(snippets, name):
+    snip = get_builtin_snippet(name)
+    if snip is not None:
+        return snip
+    return snippets[name]
+
 class SnippetCache(object):
 
     def __init__(self, doc_cache, search_path):
@@ -72,16 +78,52 @@ class SnippetCache(object):
             if snip.name not in self.snip_cache:
                 self.snip_cache[snip.name] = snip
 
-def get_deps(cache, requires):
+def get_deps(snippets, requires):
     def neighbors_func(dep):
-        return cache.get_snippet(dep).requires
+        return snippets(dep).requires
     return utils.reachable_set(requires, neighbors_func)
+
+def get_and_split_deps(snippets, requires):
+    deps = get_deps(snippets, requires)
+    mods = []
+    mod_deps = []
+    for dep in deps:
+        snip = get_builtin_snippet(dep)
+        if snip and snip.type == "mod":
+            mod_deps.append(dep)
+            mods.append(snip.name)
+    mods.sort()
+    deps.difference_update(mod_deps)
+    return deps, mods
+
+def install_missing_snips(doc, snippets, purge):
+    requires_all = doc.get_element("snips").unique_elements
+    # requires_only is what is needed if --purge was specified
+    requires_only = Snippet(doc).requires or requires_all
+    requires = set(requires_only)
+    if not purge:
+        requires.update(requires_all)
+    # TODO: gracefully handle missing dependencies
+    deps, mods = get_and_split_deps(snippets, requires)
+    doc = doc.replace_element_children(
+        "imports", [snep.Text("import {0}\n".format(mod)) for mod in mods])
+    graph = dict((dep, [x for x in snippets(dep).requires
+                        if not get_builtin_snippet(x)]) for dep in deps)
+    snip_names = utils.toposort(graph)
+    snips = []
+    for name in snip_names:
+        if snips:
+            snips.append(snep.Text("\n"))
+        snips.append(snippets(name).element)
+    # TODO: warn before deleting any existing snippets
+    #       (deletions should only happen with --purge)
+    return doc.replace_element_children("snips", snips)
 
 def ls(in_fn):
     doc = snep.parse_doc_file(in_fn)
     sys.stdout.write(utils.json_pretty(doc.to_json()))
 
-def sync(fn1, fn2):
+def sync(fn1, fn2, purge):
     doc_cache = utils.FileCache(snep.parse_doc_file)
 
     doc1 = doc_cache[fn1]
@@ -93,6 +135,8 @@ def sync(fn1, fn2):
     # - make sure there's no nonwhitespace in the interstitial spaces
     # - make sure the 'imports' element contains only import-like entries
 
+    # sanity checks on the document format
+
     nonunique_element_name = find_nonunique_element_name(snips1)
     if nonunique_element_name is not None:
         raise ValueError("{0}: non-unique snippet: {1}"
@@ -101,6 +145,8 @@ def sync(fn1, fn2):
     if nonunique_element_name is not None:
         raise ValueError("{0}: non-unique snippet: {1}"
                          .format(fn2, nonunique_element_name))
+
+    # step I: merge snippets
 
     common_snips = set(snips1.unique_elements)
     common_snips.intersection_update(snips2.unique_elements)
@@ -131,70 +177,29 @@ def sync(fn1, fn2):
         doc1 = doc1.replace_element_children("snips", snips1.children)
         doc2 = doc2.replace_element_children("snips", snips2.children)
 
-    # TODO: next, we resolve dependencies and make sure all requirements are
-    # satisfied
-    #
-    # if we are in --purge mode, then we use strictly the "requires" attribute
-    # (which if omitted is equivalent to "all present snippets")
-    #
-    # otherwise, we use "requires" + "all present snippets"
-    #
-    # if anything is missing, we borrow from the other file
-    #
-    # if it's not there, then we produce a warning
+    # step II: resolve dependencies
+
+    snips = dict(snips1.unique_elements)
+    snips.update(snips2.unique_elements)
+    for name in snips:
+        snips[name] = Snippet(snips[name])
+    get_snip = functools.partial(get_snippet, snips)
+
+    doc1 = install_missing_snips(doc1, get_snip, purge)
+    doc2 = install_missing_snips(doc2, get_snip, purge)
+
+    # TODO: overwrite the files (!!!) with backups
+    sys.stdout.write(doc2.render())
+
+    # if a dependency is not there, then we produce a warning
     # "not all dependencies are resolved; missing the following snippets:\n{0}"
     #
     # in the future, when we handle multiple files together,
     # we will silence the warning unless the dependency cannot be found in -any-
     # of the given fiels
 
-    exit(2)
-
     # search_path = os.environ["SNEP_PATH"].split(":")
     # search_path.append(in_fn)
-    # snip_cache = SnippetCache(doc_cache, search_path)
-
-    with out_file:
-
-        doc = doc_cache[in_fn]
-        requires = Snippet(doc).requires
-        deps = get_deps(snip_cache, requires)
-
-        mods = []
-        mod_deps = []
-        for dep in deps:
-            snip = get_builtin_snippet(dep)
-            if snip and snip.type == "mod":
-                mod_deps.append(dep)
-                mods.append(snip.name)
-        mods.sort()
-        deps.difference_update(mod_deps)
-
-        imps = []
-        for mod in mods:
-            imps.append(snep.Text("import {0}\n".format(mod)))
-
-        graph = dict((dep, [x for x in snip_cache.get_snippet(dep).requires
-                            if not get_builtin_snippet(x)]) for dep in deps)
-        snip_names = utils.toposort(graph)
-        snips = []
-        for name in snip_names:
-            if snips:
-                snips.append(snep.Text("\n"))
-            snips.append(snip_cache.get_snippet(name).element)
-
-        # TODO: conflict resolution:
-        # - snips that don't exist on one on the in_fn should be added
-        # - snips that do exist on the in_fn but are different should be merged
-        # - snips that exist only on in_fn should result in a message that
-        #   prints the commands needed to push to the origin
-        # - snips that exist only on in_fn and are about to be removed must NOT be
-        #   deleted unless --purge is given
-
-        doc = doc.replace_element_children("imports", imps)
-        doc = doc.replace_element_children("snips", snips)
-
-        out_file.write(doc.render())
 
 def argparser():
     import argparse
@@ -208,6 +213,7 @@ def argparser():
     spp = sp.add_parser("sync")
     spp.add_argument("fn1", metavar="file1")
     spp.add_argument("fn2", metavar="file2")
+    spp.add_argument("--purge", action="store_true")
     spp.set_defaults(func=sync)
 
     return p

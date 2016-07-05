@@ -11,10 +11,6 @@ except AttributeError:
 #@]
 
 #@snips[
-#@safe_open[
-#blah
-#@]
-
 #@MappingProxyType[
 try:
     from types import MappingProxyType
