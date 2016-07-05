@@ -1,31 +1,42 @@
 # generic
-.\#*
+.#*
+\#*#
 .nfs????
-dist/
+[tT]humbs.db
 *~
 *.log
+*.orig
+*.pid
 *.tmp
 
 # native
 a.out
 *.a
+*.aps
 *.dll
 *.dylib
 *.exe
 *.gch
 *.ipch
 *.lib
+*.ncb
 *.o
 *.obj
+*.opensdf
+*.pch
 *.so
 *.sdf
 *.stackdump
+*.suo
+*.user
 
 # Fortran
 *.mod
 
 # Haskell
 .cabal-sandbox/
+.stack-work/
+dist/
 cabal.sandbox.config
 *.chi
 *.hcr
@@ -38,6 +49,10 @@ node_modules/
 MANIFEST
 __pycache__
 *.pyc
+
+# Rust
+target/
+Cargo.lock
 
 # TeX
 *.aux

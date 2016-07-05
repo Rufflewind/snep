@@ -1,13 +1,13 @@
 from __future__ import unicode_literals
-import io, functools, json, os
-
-try:
-    StringIO = io.StringIO
-except AttributeError:
-    import cStringIO
-    StringIO = cStringIO.StringIO
+import functools, json, os
 
 #@imports[
+import ctypes
+import errno
+import io
+import os
+import shutil
+import tempfile
 #@]
 
 #@snips[
@@ -17,6 +17,13 @@ try:
 except ImportError:
     def MappingProxyType(mapping):
         return mapping
+#@]
+
+#@StringIO[
+try:
+    from io import StringIO
+except AttributeError:
+    from cStringIO import StringIO
 #@]
 
 #@reachable_set[
@@ -35,9 +42,158 @@ def reachable_set(initial, neighbors_func):
         reachable.update(neighbors)
     return reachable
 #@]
+
+#@load_file[
+#@requires: mod:io
+def load_file(filename, binary=False, encoding=None,
+              errors=None, newline=None):
+    '''Read the contents of a file.'''
+    mode = "r" + ("b" if binary else "")
+    with io.open(filename, mode, encoding=encoding,
+                 errors=errors, newline=newline) as stream:
+        return stream.read()
 #@]
 
-#@requires: load_file safe_open
+#@try_remove[
+#@requires: mod:os
+def try_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+    return True
+#@]
+
+#@wrapped_open[
+#@requires: mod:io
+def wrapped_open(open, mode="r", encoding=None,
+                 errors=None, newline=None, **kwargs):
+    '''Enhance an `open`-like function to accept some additional arguments for
+    controlling the text processing.  This is mainly done for compatibility
+    with Python 2, where these additional arguments are often not accepted.'''
+    if "b" in mode:
+        if encoding is not None:
+            raise Exception("'encoding' argument not supported in binary mode")
+        if errors is not None:
+            raise Exception("'errors' argument not supported in binary mode")
+        if newline is not None:
+            raise Exception("'newline' argument not supported in binary mode")
+        return open(mode=mode, **kwargs)
+    else:
+        mode = mode.replace("t", "") + "b"
+        stream = open(mode=mode, **kwargs)
+        try:
+            return io.TextIOWrapper(stream, encoding=encoding,
+                                    errors=errors, newline=newline)
+        except:
+            stream.close()
+            raise
+#@]
+
+#@ctypes.wintypes[
+if os.name == "nt":
+    import ctypes.wintypes
+#@]
+
+#@rename[
+#@requires: mod:os mod:ctypes ctypes.wintypes
+def rename(src, dest):
+    '''Rename a file (allows overwrites on Windows).'''
+    if os.name == "nt":
+        MoveFileExW = ctypes.windll.kernel32.MoveFileExW
+        MoveFileExW.restype = ctypes.wintypes.BOOL
+        MOVEFILE_REPLACE_EXISTING = ctypes.wintypes.DWORD(0x1)
+        success = MoveFileExW(ctypes.wintypes.LPCWSTR(src),
+                              ctypes.wintypes.LPCWSTR(dest),
+                              MOVEFILE_REPLACE_EXISTING)
+        if not success:
+            raise ctypes.WinError()
+    else:
+        os.rename(src, dest)
+#@]
+
+#@TemporarySaveFile[
+#@requires: mod:errno mod:os mod:shutil mod:tempfile rename try_remove wrapped_open
+class TemporarySaveFile(object):
+    '''A context manager for a saving files atomically.  The context manager
+    creates a temporary file to which data may be written.  If the body of the
+    `with` statement succeeds, the temporary file is renamed to the target
+    filename, overwriting any existing file.  Otherwise, the temporary file is
+    deleted.'''
+
+    def __init__(self, filename, mode="w", suffix=None, prefix=None, **kwargs):
+        self._fn = filename
+        kwargs = dict(kwargs)
+        kwargs.update({
+            "mode": mode,
+            "suffix": ".tmpsave~" if suffix is None else suffix,
+            "prefix": (".#" + os.path.basename(filename)).rstrip(".") + "."
+                      if prefix is None else prefix,
+            "dir": os.path.dirname(filename),
+            "delete": False,
+        })
+        self._kwargs = kwargs
+
+    def __enter__(self):
+        if hasattr(self, "_stream"):
+            raise ValueError("attempted to __enter__ twice")
+        stream = wrapped_open(tempfile.NamedTemporaryFile, **self._kwargs)
+        try:
+            shutil.copymode(self._fn, stream.name)
+        except BaseException as e:
+            if not (isinstance(e, OSError) and e.errno == errno.ENOENT):
+                try:
+                    stream.close()
+                finally:
+                    try_remove(stream.name)
+                raise
+        self._stream = stream
+        return stream
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            self._stream.close()
+            if exc_type is None and exc_value is None and traceback is None:
+                rename(self._stream.name, self._fn)
+            else:
+                try_remove(self._stream.name)
+        except:
+            try_remove(self._stream.name)
+            raise
+        finally:
+            del self._stream
+#@]
+
+#@safe_open[
+#@requires: mod:io TemporarySaveFile
+def safe_open(filename, mode="rt", encoding=None,
+              errors=None, newline=None, safe=True):
+    truncated_write = "w" in mode and "+" not in mode
+    if safe and truncated_write and not isinstance(filename, int):
+        open_file = TemporarySaveFile
+    else:
+        open_file = io.open
+    return open_file(filename, mode, encoding=encoding,
+                     errors=errors, newline=newline)
+#@]
+
+#@save_file[
+#@requires: safe_open
+def save_file(filename, contents, binary=False, encoding=None,
+              errors=None, newline=None, safe=True):
+    '''Write the contents to a file.  If `safe` is true, it is performed by
+    first writing into a temporary file and then replacing the original file
+    with the temporary file.  This ensures that the file will not end up in a
+    half-written state.  Note that there is a small possibility that the
+    temporary file might remain if the program crashes while writing.'''
+    mode = "w" + ("b" if binary else "")
+    with safe_open(filename, mode, encoding=encoding,
+                   errors=errors, newline=newline, safe=safe) as stream:
+        stream.write(contents)
+#@]
+#@]
+
+#@requires: load_file save_file rename StringIO
 #@requires: MappingProxyType reachable_set
 
 try:
@@ -134,12 +290,6 @@ def json_pretty(data, ensure_ascii=False):
                           separators=separators,
                           ensure_ascii=ensure_ascii)
 
-def toposort_sortnodes(graph, nodes, reverse=False):
-    '''Sort nodes by the number of immediate dependencies, followed by the
-    nodes themselves.'''
-    return sorted(nodes, key=(lambda node: (len(graph[node]), node)),
-                  reverse=reverse)
-
 def toposort_countrdeps(graph):
     '''Count the number of immediate dependents (reverse dependencies).
     Returns a dict that maps nodes to number of dependents, as well as a list
@@ -155,7 +305,7 @@ def toposort_countrdeps(graph):
             roots.append(node)
     return numrdeps, roots
 
-def toposort(graph, reverse=False):
+def toposort(graph, key=None, reverse=False):
     '''Topologically sort a directed acyclic graph, ensuring that dependents
     are placed after their dependencies, or the reverse if `reverse` is true.
 
@@ -173,16 +323,22 @@ def toposort(graph, reverse=False):
     nodes are required to form a total ordering.'''
 
     # make sure there are no duplicate edges
-    graph = dict((node, set(deps)) for node, deps in graph.items())
+    graph = dict((node, frozenset(deps)) for node, deps in graph.items())
 
     # count the number of dependents and extract the roots
     numrdeps, roots = toposort_countrdeps(graph)
 
+    if key is None:
+        def key(node):
+            '''Sort nodes by the number of immediate dependencies, followed by
+            the nodes themselves.'''
+            return len(graph[node]), node
+
     # sort nodes to ensure a deterministic topo-sorted result; current algo
     # sorts by # of immediate dependencies followed by node ID, so nodes with
     # fewer immediate dependencies and/or lower node IDs tend to come first
-    roots = toposort_sortnodes(graph, roots, reverse=reverse)
-    graph = dict((node, toposort_sortnodes(graph, deps, reverse=reverse))
+    roots = sorted(roots, key=key, reverse=reverse)
+    graph = dict((node, sorted(deps, key=key, reverse=reverse))
                  for node, deps in graph.items())
 
     # Kahn's algorithm
