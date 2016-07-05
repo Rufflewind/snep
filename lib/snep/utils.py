@@ -1,10 +1,20 @@
 from __future__ import unicode_literals
-import json
+import io, functools, json, os
+
+try:
+    StringIO = io.StringIO
+except AttributeError:
+    import cStringIO
+    StringIO = cStringIO.StringIO
 
 #@imports[
 #@]
 
 #@snips[
+#@safe_open[
+#blah
+#@]
+
 #@MappingProxyType[
 try:
     from types import MappingProxyType
@@ -34,8 +44,50 @@ def reachable_set(initial, neighbors_func):
 #@requires: load_file safe_open
 #@requires: MappingProxyType reachable_set
 
+try:
+    input = raw_input
+except NameError:
+    pass
+input = input
+
+def freeze_arguments(*args, **kwargs):
+    return (tuple(args), tuple(sorted(kwargs.items())))
+
+def cached_method(cache_name,
+                  normalizer=lambda *args, **kwargs: (args, kwargs)):
+    '''Note: arguments must be hashable.'''
+    @functools.wraps(cached_method)
+    def inner(func):
+        @functools.wraps(func)
+        def inner(self, *args, **kwargs):
+            args, kwargs = normalizer(*args, **kwargs)
+            full_args = freeze_arguments(*args, **kwargs)
+            try:
+                cache = getattr(self, cache_name)
+            except AttributeError:
+                cache = {}
+                setattr(self, cache_name, cache)
+            try:
+                return cache[full_args]
+            except KeyError:
+                pass
+            value = func(self, *args, **kwargs)
+            cache[full_args] = value
+            return value
+        return inner
+    return inner
+
+def invalid_cached_method(self, cache_name, *args, **kwargs):
+    cache = getattr(self, cache_name, None)
+    full_args = freeze_arguments(*args, **kwargs)
+    try:
+        del cache[full-args]
+    except KeyError:
+        pass
+
 def cached_property(func):
     name = "_{0}_cache".format(func.__name__)
+    @functools.wraps(func)
     def inner(self):
         try:
             return getattr(self, name)
@@ -45,6 +97,29 @@ def cached_property(func):
         setattr(self, name, value)
         return value
     return property(inner)
+
+def realpath_normalizer(fn):
+    return (os.path.realpath(fn),), {}
+
+class FileCache(object):
+
+    def __init__(self, load_func):
+        '''(FileCache, (filenameStr) -> a) -> a
+
+        load_func is an arbitrary function that returns a value associated
+        with the given file.  The cache stores the result of this function.'''
+        self._load_func = load_func
+
+    @cached_method("_cache", normalizer=realpath_normalizer)
+    def __getitem__(self, fn):
+        '''Obtain the cached value for the given file, or run the load_func if
+        the file is not yet cached.'''
+        return self._load_func(fn)
+
+    def __delitem__(self, fn):
+        '''Invalid the cache for the given file.  Has no effect if the file is
+        not cached.'''
+        invalidate_method_cache(self, "_cache", normalizer=realpath_normalizer)
 
 def json_canonical(data, ensure_ascii=False, sort_keys=True, **kwargs):
     return json.dumps(

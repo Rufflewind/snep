@@ -4,6 +4,7 @@ import os, re, sys
 sys.path.insert(0, os.path.realpath(
     os.path.join(os.path.dirname(__file__), "../lib")))
 import snep
+import snep.merge
 import snep.utils as utils
 
 class BuiltinSnippet(object):
@@ -25,13 +26,19 @@ class Snippet(object):
     def __repr__(self):
         return "Snippet({0!r})".format(self.element)
 
+def find_nonunique_element_name(element):
+    if not element.has_unique_elements:
+        for name in element.elements:
+            if name not in element.unique_elements:
+                return name
+        assert False
+
 def find_all_snippets(element):
     snips = element.get_element("snips")
-    if not snips.has_unique_elements:
-        for name in snips.elements:
-            if name not in snips.unique_elements:
-                raise ValueError("non-unique element: {0}".format(name))
-        assert False
+    nonunique_element_name = find_nonunique_element_name(snips)
+    if nonunique_element_name is not None:
+        raise ValueError("non-unique element: {0}"
+                         .format(nonunique_element_name))
     return map(Snippet, snips.unique_elements.values())
 
 def get_builtin_snippet(name):
@@ -41,9 +48,9 @@ def get_builtin_snippet(name):
 
 class SnippetCache(object):
 
-    def __init__(self, search_path):
+    def __init__(self, doc_cache, search_path):
         self.search_path_stack = list(reversed(search_path))
-        self.doc_cache = {}
+        self.doc_cache = doc_cache
         self.snip_cache = {}
 
     def get_snippet(self, name):
@@ -60,18 +67,10 @@ class SnippetCache(object):
         raise ValueError("can't find snippet: {0}".format(name))
 
     def _load_document(self, fn):
-        doc = self.get_document(fn)
+        doc = self.doc_cache[fn]
         for snip in find_all_snippets(doc):
             if snip.name not in self.snip_cache:
                 self.snip_cache[snip.name] = snip
-
-    def get_document(self, fn):
-        fn = os.path.realpath(fn)
-        doc = self.doc_cache.get(fn, None)
-        if doc is None:
-            doc = snep.parse_doc(fn)
-            self.doc_cache[fn] = doc
-        return doc
 
 def get_deps(cache, requires):
     def neighbors_func(dep):
@@ -79,26 +78,87 @@ def get_deps(cache, requires):
     return utils.reachable_set(requires, neighbors_func)
 
 def ls(in_fn):
-    doc = snep.parse_doc(in_fn)
+    doc = snep.parse_doc_file(in_fn)
     sys.stdout.write(utils.json_pretty(doc.to_json()))
 
-def sync(in_fn, output, in_place):
-    if in_place:
-        out_file = utils.safe_open(in_fn, "w")
-    elif output is None:
-        out_file = sys.stdout
-    else:
-        out_file = utils.safe_open(output, "w")
+def sync(fn1, fn2):
+    doc_cache = utils.FileCache(snep.parse_doc_file)
 
-    search_path = os.environ["SNEP_PATH"].split(":")
-    search_path.append(in_fn)
-    cache = SnippetCache(search_path)
+    doc1 = doc_cache[fn1]
+    snips1 = doc1.get_element("snips")
+    doc2 = doc_cache[fn2]
+    snips2 = doc2.get_element("snips")
+
+    # TODO: do some basic validation
+    # - make sure there's no nonwhitespace in the interstitial spaces
+    # - make sure the 'imports' element contains only import-like entries
+
+    nonunique_element_name = find_nonunique_element_name(snips1)
+    if nonunique_element_name is not None:
+        raise ValueError("{0}: non-unique snippet: {1}"
+                         .format(fn1, nonunique_element_name))
+    nonunique_element_name = find_nonunique_element_name(snips2)
+    if nonunique_element_name is not None:
+        raise ValueError("{0}: non-unique snippet: {1}"
+                         .format(fn2, nonunique_element_name))
+
+    common_snips = set(snips1.unique_elements)
+    common_snips.intersection_update(snips2.unique_elements)
+    conflicting_snips1 = {}
+    conflicting_snips2 = {}
+    for name in common_snips:
+        snip1 = snips1.get_element(name)
+        snip2 = snips2.get_element(name)
+        if snip1 != snip2:
+            conflicting_snips1[name] = snip1.render()
+            conflicting_snips2[name] = snip2.render()
+    if conflicting_snips1:
+        merge_result = snep.merge.interactive_merge(conflicting_snips1,
+                                                    conflicting_snips2)
+        if merge_result is None:
+            sys.stderr.write("Canceled.\n")
+            sys.stderr.flush()
+            exit(1)
+        if frozenset(merge_result) != frozenset(conflicting_snips2):
+            sys.stderr.write("Error: snippets were added or removed "
+                             "during merge.\n")
+            sys.stderr.flush()
+            exit(1)
+        for name, merge_snip_str in merge_result.items():
+            snip = snep.parse_doc(merge_snip_str, name)
+            snips1 = snips1.replace_element_children(name, snip.children)
+            snips2 = snips2.replace_element_children(name, snip.children)
+        doc1 = doc1.replace_element_children("snips", snips1.children)
+        doc2 = doc2.replace_element_children("snips", snips2.children)
+
+    # TODO: next, we resolve dependencies and make sure all requirements are
+    # satisfied
+    #
+    # if we are in --purge mode, then we use strictly the "requires" attribute
+    # (which if omitted is equivalent to "all present snippets")
+    #
+    # otherwise, we use "requires" + "all present snippets"
+    #
+    # if anything is missing, we borrow from the other file
+    #
+    # if it's not there, then we produce a warning
+    # "not all dependencies are resolved; missing the following snippets:\n{0}"
+    #
+    # in the future, when we handle multiple files together,
+    # we will silence the warning unless the dependency cannot be found in -any-
+    # of the given fiels
+
+    exit(2)
+
+    # search_path = os.environ["SNEP_PATH"].split(":")
+    # search_path.append(in_fn)
+    # snip_cache = SnippetCache(doc_cache, search_path)
 
     with out_file:
 
-        doc = snep.parse_doc(in_fn)
+        doc = doc_cache[in_fn]
         requires = Snippet(doc).requires
-        deps = get_deps(cache, requires)
+        deps = get_deps(snip_cache, requires)
 
         mods = []
         mod_deps = []
@@ -114,14 +174,22 @@ def sync(in_fn, output, in_place):
         for mod in mods:
             imps.append(snep.Text("import {0}\n".format(mod)))
 
-        graph = dict((dep, [x for x in cache.get_snippet(dep).requires
+        graph = dict((dep, [x for x in snip_cache.get_snippet(dep).requires
                             if not get_builtin_snippet(x)]) for dep in deps)
         snip_names = utils.toposort(graph)
         snips = []
         for name in snip_names:
             if snips:
                 snips.append(snep.Text("\n"))
-            snips.append(cache.get_snippet(name).element)
+            snips.append(snip_cache.get_snippet(name).element)
+
+        # TODO: conflict resolution:
+        # - snips that don't exist on one on the in_fn should be added
+        # - snips that do exist on the in_fn but are different should be merged
+        # - snips that exist only on in_fn should result in a message that
+        #   prints the commands needed to push to the origin
+        # - snips that exist only on in_fn and are about to be removed must NOT be
+        #   deleted unless --purge is given
 
         doc = doc.replace_element_children("imports", imps)
         doc = doc.replace_element_children("snips", snips)
@@ -138,10 +206,8 @@ def argparser():
     spp.set_defaults(func=ls)
 
     spp = sp.add_parser("sync")
-    spp.add_argument("in_fn", metavar="filename")
-    g = spp.add_mutually_exclusive_group()
-    g.add_argument("--in-place", "-i", action="store_true")
-    g.add_argument("--output", "-o")
+    spp.add_argument("fn1", metavar="file1")
+    spp.add_argument("fn2", metavar="file2")
     spp.set_defaults(func=sync)
 
     return p
@@ -158,6 +224,8 @@ def main():
     except snep.ParseError as e:
         sys.stderr.write("{0}:{1}: {2}\n".format(e.src, e.row, e.msg))
         sys.stderr.flush()
+        exit(1)
+    except KeyboardInterrupt:
         exit(1)
 
 if __name__ == "__main__":

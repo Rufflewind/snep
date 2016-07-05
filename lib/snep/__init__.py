@@ -1,4 +1,4 @@
-import re
+import collections, re
 from . import utils
 
 def _render_recursor(out, node):
@@ -29,13 +29,20 @@ class ParseError(Exception):
         self.row = row
         self.msg = msg
 
+Origin = collections.namedtuple("Origin", [
+    "filename",
+    "line",
+    "column",
+])
+
 class Node(object):
     pass
 
 class Text(Node):
 
-    def __init__(self, value):
+    def __init__(self, value, origin=Origin(None, None, None)):
         self.value = value
+        self.origin = origin
 
     def __repr__(self):
         return "Text({0!r})".format(self.value)
@@ -69,9 +76,10 @@ class Text(Node):
 
 class Attribute(Node):
 
-    def __init__(self, name, value):
+    def __init__(self, name, value, origin=Origin(None, None, None)):
         self.name = name
         self.value = value
+        self.origin = origin
 
     def __repr__(self):
         return "Attribute({0!r}, {1!r})".format(self.name, self.value)
@@ -105,11 +113,12 @@ class Attribute(Node):
 
 class Element(Node):
 
-    def __init__(self, name, children):
+    def __init__(self, name, children, origin=Origin(None, None, None)):
         if not isinstance(children, tuple):
             children = tuple(children)
         self.name = name
         self.children = children
+        self.origin = origin
 
     def __repr__(self):
         return "Element({0!r}, {1!r})".format(self.name, self.children)
@@ -214,23 +223,30 @@ class Element(Node):
             raise KeyError("element does not exist: {0}".format(name))
         raise NonuniqueElementError("element is not unique: {0}".format(name))
 
-    def replace_element(self, name, element):
-        '''Element -> (nameStr, Element) -> Element
+    def replace_name(self, name):
+        '''(Element, nameStr) -> Element
 
-        Replace the element with the given name and return self after the
-        modification (self is not altered).  An error is raised if the element
-        does not exist, or its name not unique.'''
+        Return a new Element with the same children as self but the provided
+        name.'''
+        return Element(name, self.children)
+
+    def replace_element(self, name, element):
+        '''(Element, nameStr, Element) -> Element
+
+        Replace the child element with the given name and return self after
+        the modification (self is not altered).  An error is raised if the
+        element does not exist, or its name not unique.'''
         self.get_element(name)
         children = list(self.children)
         children[self.element_indices[name][0]] = element
         return Element(self.name, children)
 
     def replace_element_children(self, name, children):
-        '''Element -> (nameStr, [Node]) -> Element
+        '''(Element, nameStr, [Node]) -> Element
 
-        Replace the children of element with the given name and return self
-        after the modification (self is not altered).  An error is raised if
-        the element does not exist, or its name not unique.'''
+        Replace the children of child element with the given name and return
+        self after the modification (self is not altered).  An error is raised
+        if the element does not exist, or its name not unique.'''
         return self.replace_element(name, Element(name, children))
 
     def to_json(self):
@@ -278,31 +294,41 @@ def parse_directives(indexed_lines, src):
         else:
             assert False
 
-def parse_doc(fn):
-    '''Parse the file as a single Element.'''
-    with open(fn) as f:
-        root_elem = (None, [])
-        elem = root_elem
-        stack = []
-        for i, cmd, data in parse_directives(enumerate(f, 1), fn):
-            if cmd == "line":
-                elem[1].append(Text(data))
-            elif cmd == "attr":
-                elem[1].append(Attribute(*data))
-            elif cmd == "begin":
-                new_elem = (data, [])
-                elem[1].append(new_elem)
-                stack.append(elem)
-                elem = new_elem
-            elif cmd == "end":
-                try:
-                    old_elem = elem
-                    elem = stack.pop()
-                    elem[1][-1] = Element(*old_elem)
-                except IndexError:
-                    raise ParseError(fn, i, "unmatched ']'")
-            else:
-                assert False
+def parse_doc_stream(f, fn):
+    root_elem = (None, [], Origin(fn, 1, None))
+    elem = root_elem
+    stack = []
+    for i, cmd, data in parse_directives(enumerate(f, 1), fn):
+        if cmd == "line":
+            elem[1].append(Text(data, origin=Origin(fn, i, None)))
+        elif cmd == "attr":
+            name, value = data
+            elem[1].append(Attribute(name, value,
+                                     origin=Origin(fn, i, None)))
+        elif cmd == "begin":
+            new_elem = (data, [], Origin(fn, i, None))
+            elem[1].append(new_elem)
+            stack.append(elem)
+            elem = new_elem
+        elif cmd == "end":
+            try:
+                old_elem = elem
+                elem = stack.pop()
+                elem[1][-1] = Element(*old_elem)
+            except IndexError:
+                raise ParseError(fn, i, "unmatched ']'")
+        else:
+            assert False
     if stack:
         raise ParseError(fn, i, "unclosed '['")
     return Element(*root_elem)
+
+def parse_doc(s, fn):
+    '''Parse the str as a single Element.'''
+    with utils.StringIO(s) as f:
+        return parse_doc_stream(f, fn)
+
+def parse_doc_file(fn):
+    '''Parse the file as a single Element.'''
+    with open(fn) as f:
+        return parse_doc_stream(f, fn)
