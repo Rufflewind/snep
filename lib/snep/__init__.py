@@ -1,25 +1,6 @@
 import collections, re
 from . import utils
 
-def _render_recursor(out, node):
-    if isinstance(node, Text): # text
-        out.append(node.value)
-    else:
-        if len(out) and not out[-1].endswith("\n"):
-            # make sure there's a newline before appending directive
-            out.append("\n")
-        if isinstance(node, Attribute):
-            out.append("#@{0}: {1}\n".format(node.name, node.value))
-        elif isinstance(node, Element):
-            out.append("#@{0}[\n".format(node.name))
-            for subnode in node.children:
-                _render_recursor(out, subnode)
-            out.append("#@]\n")
-        else:
-            # Node should not be subclassed by anything else
-            assert not isinstance(node, Node)
-            raise ValueError("not a subclass of Node: " + repr(node))
-
 class NonuniqueElementError(KeyError):
     pass
 
@@ -36,7 +17,12 @@ Origin = collections.namedtuple("Origin", [
 ])
 
 class Node(object):
-    pass
+
+    def render(self):
+        return "".join(self.irender())
+
+    def irender(self):
+        raise NotImplemented()
 
 class Text(Node):
 
@@ -74,6 +60,9 @@ class Text(Node):
     def to_json(self):
         return self.value
 
+    def irender(self):
+        yield self.value
+
 class Attribute(Node):
 
     def __init__(self, name, value, origin=Origin(None, None, None)):
@@ -110,6 +99,9 @@ class Attribute(Node):
 
     def to_json(self):
         return [self.name, self.value]
+
+    def irender(self):
+        yield "#@{0}: {1}\n".format(self.name, self.value)
 
 class Element(Node):
 
@@ -261,11 +253,14 @@ class Element(Node):
         '''
         return [self.name, [child.to_json() for child in self.children]]
 
-    def render(self):
-        out = []
-        for node in self.children:
-            _render_recursor(out, node)
-        return "".join(out)
+    def irender(self):
+        if self.name is not None:
+            yield "#@{0}[\n".format(self.name)
+        for subnode in self.children:
+            for chunk in subnode.irender():
+                yield chunk
+        if self.name is not None:
+            yield "#@]\n"
 
 def parse_directives(indexed_lines, src):
     for i, line in indexed_lines:
