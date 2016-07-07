@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.realpath(
     os.path.join(os.path.dirname(__file__), "../lib")))
 import snep
 import snep.merge
+import snep.syntaxes
 import snep.utils as utils
 
 class SnippetBase(object):
@@ -163,12 +164,33 @@ def check_for_nonimports(imports):
                              .format(child.origin.filename,
                                      child.render().strip()))
 
-def ls(fn):
+def get_guess_syntax_kwargs(fn):
+    kwargs = {
+        "extension": os.path.splitext(fn)[1][1:],
+        "shebang": "",
+    }
+    try:
+        shebang = next(open(fn))
+        if shebang.startswith("#!"):
+            kwargs["shebang"] = shebang
+    except StopIteration:
+        pass
+    return kwargs
+
+def to_json(fn, syntax):
+    if syntax is None:
+        syntax = snep.syntaxes.guess_syntax(**get_guess_syntax_kwargs(fn))
     doc = snep.parse_doc_file(fn)
     sys.stdout.write(utils.json_pretty(doc.to_json()))
     sys.stdout.write("\n")
 
-def sync(fn1, fn2, purge, dry_run):
+def sync(fn1, fn2, purge, dry_run, syntax):
+    if syntax is None:
+        syntax = snep.syntaxes.guess_syntax(**get_guess_syntax_kwargs(fn1))
+        syntax2 = snep.syntaxes.guess_syntax(**get_guess_syntax_kwargs(fn2))
+        if syntax != syntax2:
+            raise ValueError("detected conflicting syntaxes: {0} vs {1}"
+                             .format(syntax, syntax2))
 
     # TODO: distinguish between orphan snippets that are deleted
     #       and snippets that are deleted but still exist elsewhere
@@ -257,11 +279,14 @@ def sync(fn1, fn2, purge, dry_run):
 def argparser():
     import argparse
     p = argparse.ArgumentParser()
+    p.add_argument("-s", "--syntax",
+                   metavar="SYNTAXES",
+                   help="override the markup syntax")
     sp = p.add_subparsers(help="subcommand")
 
-    spp = sp.add_parser("ls")
+    spp = sp.add_parser("to_json")
     spp.add_argument("fn", metavar="filename")
-    spp.set_defaults(func=ls)
+    spp.set_defaults(func=to_json)
 
     spp = sp.add_parser("sync")
     spp.add_argument("fn1", metavar="file1")
