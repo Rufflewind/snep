@@ -2,7 +2,7 @@
 from __future__ import print_function, unicode_literals
 import functools, os, re, sys
 sys.path.insert(0, os.path.realpath(
-    os.path.join(os.path.dirname(__file__), "../lib")))
+    os.path.join(os.path.dirname(os.path.realpath(__file__)), "../lib")))
 import snep
 import snep.merge
 import snep.syntaxes
