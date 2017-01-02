@@ -120,9 +120,9 @@ def install_required_snips(doc, get_snippet, purge):
         requires.update(requires_all)
     deps = get_deps(get_snippet, requires)
     for dep in deps:
-        if isinstance(dep, MissingSnippet):
+        if isinstance(get_snippet(dep), MissingSnippet):
             sys.stderr.write("warning: missing snippet: {0}\n"
-                             .format(dep.name))
+                             .format(dep))
             sys.stderr.flush()
     mods = get_mods(get_snippet, deps)
     doc = doc.replace_element_children(
