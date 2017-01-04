@@ -91,9 +91,9 @@ def interactive_merge(files1, files2, base_files=None, name="file"):
                                  "cancel the merge.\n")
                 sys.stdout.flush()
                 run_interactive_shell(cwd=tmp_dir)
-                if not simple_call(["git", "-C", tmp_dir, "merge", "right",
-                                    "--allow-unrelated-histories", "-m",
-                                    "merge"],
+                if not simple_call(["git", "-C", tmp_dir, "merge", "-q",
+                                    "right", "--allow-unrelated-histories",
+                                    "-m", "merge"],
                                    check=False, stderr="/dev/null"):
                     break
                 sys.stdout.write(
