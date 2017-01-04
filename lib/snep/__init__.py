@@ -172,9 +172,9 @@ class Element(Node):
     def unique_elements(self):
         '''(Element) -> {nameStr: Element}
 
-        Return a dict-like object containing all child elements whose names
-        are unique.'''
-        elems = {}
+        Return an OrderedDict containing all child elements whose names are
+        unique.'''
+        elems = collections.OrderedDict()
         for node in self.children:
             if not isinstance(node, Element):
                 continue
@@ -182,7 +182,7 @@ class Element(Node):
                 del elems[node.name]
             except KeyError:
                 elems[node.name] = node
-        return utils.MappingProxyType(elems)
+        return elems
 
     @utils.cached_property
     def has_unique_elements(self):

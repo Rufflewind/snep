@@ -43,6 +43,8 @@ class BuiltinSnippet(SpecialSnippet):
         if type not in ["mod"]:
             raise ValueError("Unsupported built-in snippet prefix: {0}"
                              .format(type))
+        if not re.match("\w+$", name):
+            raise ValueError("Invalid module name: {0}".format(name))
         self.type = type
         self.name = name
         self.requires = frozenset()
@@ -111,7 +113,13 @@ def get_mods(get_snippet, deps):
     mods.sort()
     return mods
 
-def install_required_snips(doc, get_snippet, purge):
+def filter_away_mods(get_snippet, deps):
+    for dep in deps:
+        snip = get_snippet(dep)
+        if snip.type != "mod":
+            yield dep
+
+def install_required_snips(doc, get_snippet, purge, snips_indices, sort):
     requires_all = doc.get_element("snips").unique_elements
     # requires_only is what is needed if --purge was specified
     requires_only = Snippet(doc).requires or requires_all
@@ -127,12 +135,20 @@ def install_required_snips(doc, get_snippet, purge):
     mods = get_mods(get_snippet, deps)
     doc = doc.replace_element_children(
         "imports", [snep.Text("import {0}\n".format(mod)) for mod in mods])
-    graph = dict((dep, [x for x in get_snippet(dep).requires]) for dep in deps)
+    graph = dict((dep, [x for x in
+                        filter_away_mods(get_snippet, get_snippet(dep).requires)])
+                 for dep in filter_away_mods(get_snippet, deps))
     for name in requires_all:
         if name not in graph:
             sys.stderr.write("warning: will be deleted: {0}\n".format(name))
             sys.stderr.flush()
-    snip_names = utils.toposort(graph)
+    if sort:
+        def key(name):
+            return name
+    else:
+        def key(name):
+            return (snips_indices.get(name, float("inf")), name)
+    snip_names = utils.toposort(graph, key=key, flip=True)
     snips = []
     for name in snip_names:
         if isinstance(get_snippet(name), SpecialSnippet):
@@ -185,7 +201,7 @@ def to_json(fn, syntax):
     sys.stdout.write(utils.json_pretty(doc.to_json()))
     sys.stdout.write("\n")
 
-def sync(fn1, fn2, purge, dry_run, syntax):
+def sync(fn1, fn2, purge, dry_run, syntax, direction, sort):
     if syntax is None:
         syntax = snep.syntaxes.guess_syntax(**get_guess_syntax_kwargs(fn1))
         syntax2 = snep.syntaxes.guess_syntax(**get_guess_syntax_kwargs(fn2))
@@ -202,6 +218,10 @@ def sync(fn1, fn2, purge, dry_run, syntax):
     snips1 = doc1.get_element("snips")
     doc2 = snep.parse_doc(utils.load_file(fn2), fn2)
     snips2 = doc2.get_element("snips")
+    snips1_indices = dict((name, i) for i, name in
+                          enumerate(snips1.unique_elements.keys()))
+    snips2_indices = dict((name, i) for i, name in
+                          enumerate(snips2.unique_elements.keys()))
 
     # sanity checks on the document format
     # to avoid accidental loss of data
@@ -231,17 +251,24 @@ def sync(fn1, fn2, purge, dry_run, syntax):
             conflicting_snips1[name] = snip1.replace_name(None).render()
             conflicting_snips2[name] = snip2.replace_name(None).render()
     if conflicting_snips1:
-        merge_result = snep.merge.interactive_merge(conflicting_snips1,
-                                                    conflicting_snips2)
-        if merge_result is None:
-            sys.stderr.write("Canceled.\n")
-            sys.stderr.flush()
-            exit(1)
-        if frozenset(merge_result) != frozenset(conflicting_snips2):
-            sys.stderr.write("Error: snippets were added or removed "
-                             "during merge.\n")
-            sys.stderr.flush()
-            exit(1)
+        if direction == "left":
+            merge_result = conflicting_snips2
+        elif direction == "right":
+            merge_result = conflicting_snips1
+        elif direction is None:
+            merge_result = snep.merge.interactive_merge(conflicting_snips1,
+                                                        conflicting_snips2)
+            if merge_result is None:
+                sys.stderr.write("Canceled.\n")
+                sys.stderr.flush()
+                exit(1)
+            if frozenset(merge_result) != frozenset(conflicting_snips2):
+                sys.stderr.write("Error: snippets were added or removed "
+                                 "during merge.\n")
+                sys.stderr.flush()
+                exit(1)
+        else:
+            raise Exception("unexpected direction: {!r}".format(direction))
         for name, merge_snip_str in merge_result.items():
             snip = snep.parse_doc(merge_snip_str, name)
             snips1 = snips1.replace_element_children(name, snip.children)
@@ -257,8 +284,10 @@ def sync(fn1, fn2, purge, dry_run, syntax):
         snips[name] = Snippet(snips[name])
     get_snip = functools.partial(get_snippet, snips)
 
-    doc1 = install_required_snips(doc1, get_snip, purge)
-    doc2 = install_required_snips(doc2, get_snip, purge)
+    doc1 = install_required_snips(doc1, get_snip, purge,
+                                  snips1_indices, sort=sort)
+    doc2 = install_required_snips(doc2, get_snip, purge,
+                                  snips2_indices, sort=sort)
 
     if dry_run:
         return
@@ -295,6 +324,12 @@ def argparser():
     spp = sp.add_parser("sync")
     spp.add_argument("fn1", metavar="file1")
     spp.add_argument("fn2", metavar="file2")
+    g = spp.add_mutually_exclusive_group()
+    g.add_argument("-l", "--to-left", dest="direction",
+                   action="store_const", const="left")
+    g.add_argument("-r", "--to-right", dest="direction",
+                   action="store_const", const="right")
+    spp.add_argument("-s", "--sort", action="store_true")
     spp.add_argument("--purge", action="store_true")
     spp.add_argument("--dry-run", "-n", action="store_true")
     spp.set_defaults(func=sync)
