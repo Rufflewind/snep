@@ -105,12 +105,14 @@ class Attribute(Node):
 
 class Element(Node):
 
-    def __init__(self, name, children, origin=Origin(None, None, None)):
+    def __init__(self, name, children, origin=Origin(None, None, None),
+                 end_comment=""):
         if not isinstance(children, tuple):
             children = tuple(children)
         self.name = name
         self.children = children
         self.origin = origin
+        self.end_comment = end_comment
 
     def __repr__(self):
         return "Element({0!r}, {1!r})".format(self.name, self.children)
@@ -220,7 +222,14 @@ class Element(Node):
 
         Return a new Element with the same children as self but the provided
         name.'''
-        return Element(name, self.children)
+        return Element(name, self.children, end_comment=self.end_comment)
+
+    def replace_children(self, children):
+        '''(Element, [Node]) -> Element
+
+        Return a new Element with the same name as self but the provided
+        children.'''
+        return Element(self.name, children, end_comment=self.end_comment)
 
     def replace_element(self, name, element):
         '''(Element, nameStr, Element) -> Element
@@ -231,7 +240,7 @@ class Element(Node):
         self.get_element(name)
         children = list(self.children)
         children[self.element_indices[name][0]] = element
-        return Element(self.name, children)
+        return self.replace_children(children)
 
     def replace_element_children(self, name, children):
         '''(Element, nameStr, [Node]) -> Element
@@ -239,7 +248,8 @@ class Element(Node):
         Replace the children of child element with the given name and return
         self after the modification (self is not altered).  An error is raised
         if the element does not exist, or its name not unique.'''
-        return self.replace_element(name, Element(name, children))
+        new_element = self.get_element(name).replace_children(children)
+        return self.replace_element(name, new_element)
 
     def to_json(self):
         '''
@@ -260,7 +270,7 @@ class Element(Node):
             for chunk in subnode.irender():
                 yield chunk
         if self.name is not None:
-            yield "#@]\n"
+            yield "#@]{0}\n".format(self.end_comment)
 
 def parse_directives(indexed_lines, src):
     for i, line in indexed_lines:
@@ -272,8 +282,8 @@ def parse_directives(indexed_lines, src):
         directive = directive.rstrip()
         if not directive:
             continue
-        if directive == "]":
-            yield i, "end", None
+        if directive.startswith("]"):
+            yield i, "end", directive[1:]
             continue
         m = re.match("([^[:\s]+)\s*([[:])\s*(.*)", directive)
         if not m:
@@ -290,7 +300,7 @@ def parse_directives(indexed_lines, src):
             assert False
 
 def parse_doc_stream(f, fn):
-    root_elem = (None, [], Origin(fn, 1, None))
+    root_elem = [None, [], Origin(fn, 1, None), ""]
     elem = root_elem
     stack = []
     for i, cmd, data in parse_directives(enumerate(f, 1), fn):
@@ -301,13 +311,14 @@ def parse_doc_stream(f, fn):
             elem[1].append(Attribute(name, value,
                                      origin=Origin(fn, i, None)))
         elif cmd == "begin":
-            new_elem = (data, [], Origin(fn, i, None))
+            new_elem = [data, [], Origin(fn, i, None), ""]
             elem[1].append(new_elem)
             stack.append(elem)
             elem = new_elem
         elif cmd == "end":
+            elem[3] = data
+            old_elem = elem
             try:
-                old_elem = elem
                 elem = stack.pop()
                 elem[1][-1] = Element(*old_elem)
             except IndexError:
