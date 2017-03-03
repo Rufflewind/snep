@@ -1,78 +1,84 @@
-use std::{self, fmt, io, mem};
+use std::{self, fmt, iter, io, mem};
+use std::convert::TryFrom;
+use std::io::Read;
+use std::rc::Rc;
 use debug::debug_utf8;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Delim<T> { Open(T), Close(T) }
+pub mod delimiter {
+    use std;
+    use self::Direction::*;
+    use self::Delim::*;
 
-impl<T> std::ops::Not for Delim<T> {
-    type Output = Self;
-    fn not(self) -> Self::Output {
-        use self::Delim::*;
-        match self {
-            Open(x) => Close(x),
-            Close(x) => Open(x),
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Direction {
+        Open,
+        Close,
+    }
+
+    impl std::ops::Not for Direction {
+        type Output = Self;
+        fn not(self) -> Self::Output {
+            match self {
+                Direction::Open => Direction::Close,
+                Direction::Close => Direction::Open,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Delim {
+        Parenthesis,
+        Bracket,
+        Brace,
+    }
+
+    impl Delim {
+        pub fn open(self) -> Delimiter {
+            Delimiter(Open, self)
+        }
+        pub fn close(self) -> Delimiter {
+            Delimiter(Close, self)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct Delimiter(pub Direction, pub Delim);
+
+    impl std::convert::TryFrom<u8> for Delimiter {
+        type Err = ();
+        fn try_from(d: u8) -> Result<Self, Self::Err> {
+            match d {
+                b'(' => Ok(Delimiter(Open, Parenthesis)),
+                b')' => Ok(Delimiter(Close, Parenthesis)),
+                b'[' => Ok(Delimiter(Open, Bracket)),
+                b']' => Ok(Delimiter(Close, Bracket)),
+                b'{' => Ok(Delimiter(Open, Brace)),
+                b'}' => Ok(Delimiter(Close, Brace)),
+                _ => Err(()),
+            }
+        }
+    }
+
+    impl Delimiter {
+        pub fn to_u8(self) -> u8 {
+            self.as_bytes()[0]
+        }
+
+        pub fn as_bytes(self) -> &'static [u8] {
+            match self {
+                Delimiter(Open, Parenthesis) => b"(",
+                Delimiter(Close, Parenthesis) => b")",
+                Delimiter(Open, Bracket) => b"[",
+                Delimiter(Close, Bracket) => b"]",
+                Delimiter(Open, Brace) => b"{",
+                Delimiter(Close, Brace) => b"}",
+            }
         }
     }
 }
 
-impl<T> Delim<T> {
-    pub fn value(&self) -> &T {
-        match self {
-            &Delim::Open(ref x) => x,
-            &Delim::Close(ref x) => x,
-        }
-    }
-
-    pub fn value_mut(&mut self) -> &mut T {
-        match self {
-            &mut Delim::Open(ref mut x) => x,
-            &mut Delim::Close(ref mut x) => x,
-        }
-    }
-
-    pub fn into_value(self) -> T {
-        match self {
-            Delim::Open(x) => x,
-            Delim::Close(x) => x,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DelimType { Bracket, Parenthesis, Brace }
-
-impl Delim<DelimType> {
-    pub fn from_u8(d: u8) -> Option<Self> {
-        use self::Delim::*;
-        use self::DelimType::*;
-        match d {
-            b'(' => Some(Open(Parenthesis)),
-            b')' => Some(Close(Parenthesis)),
-            b'[' => Some(Open(Bracket)),
-            b']' => Some(Close(Bracket)),
-            b'{' => Some(Open(Brace)),
-            b'}' => Some(Close(Brace)),
-            _ => None,
-        }
-    }
-
-    pub fn to_u8(&self) -> u8 {
-        self.as_bytes()[0]
-    }
-
-    pub fn as_bytes(&self) -> &'static [u8] {
-        use self::Delim::*;
-        use self::DelimType::*;
-        match self {
-            &Open(Parenthesis) => b"(",
-            &Close(Parenthesis) => b")",
-            &Open(Bracket) => b"[",
-            &Close(Bracket) => b"]",
-            &Open(Brace) => b"{",
-            &Close(Brace) => b"}",
-        }
-    }
-}
+use self::delimiter::Direction::*;
+use self::delimiter::{Delim, Delimiter};
 
 pub fn is_ascii_space(c: u8) -> bool {
     match c {
@@ -83,26 +89,31 @@ pub fn is_ascii_space(c: u8) -> bool {
 }
 
 /// If `name` is empty, then the location is considered unknown.
-#[derive(Clone, Copy, Debug)]
-pub struct Loc<'a> {
-    pub name: &'a str,
+#[derive(Clone, Debug)]
+pub struct Loc {
+    /// Name of the file.
+    pub name: Rc<String>,
+
+    /// Zero-based line number.
     pub row: usize,
+
+    /// Zero-based column number.
     pub col: usize,
 }
 
-impl<'a> Loc<'a> {
-    pub fn new(name: &'a str) -> Self {
+impl From<Rc<String>> for Loc {
+    fn from(name: Rc<String>) -> Self {
         Loc { name: name, row: 0, col: 0 }
     }
 }
 
-impl<'a> Default for Loc<'a> {
+impl Default for Loc {
     fn default() -> Self {
-        Loc::new("")
+        Loc::from(Rc::new(Default::default()))
     }
 }
 
-impl<'a> fmt::Display for Loc<'a> {
+impl fmt::Display for Loc {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self.name.is_empty() {
             write!(f, "<unknown>")
@@ -112,10 +123,10 @@ impl<'a> fmt::Display for Loc<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Token<'a>{
-    Chunk(Loc<'a>, &'a [u8]),
-    Tag(Loc<'a>, &'a [u8], Delim<DelimType>),
+    Chunk(Loc, &'a [u8]),
+    Tag(Loc, &'a [u8], Delimiter),
 }
 
 impl<'a> fmt::Debug for Token<'a> {
@@ -138,15 +149,15 @@ impl<'a> fmt::Debug for Token<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Lexer<'a> {
     input: &'a [u8],
-    loc: Loc<'a>,
-    state: Option<(&'a [u8], Delim<DelimType>)>,
+    loc: Loc,
+    state: Option<(&'a [u8], Delimiter)>,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(input: &'a [u8], loc: Loc<'a>) -> Self {
+    fn new(input: &'a [u8], loc: Loc) -> Self {
         Lexer { input: input, loc: loc, state: None }
     }
 }
@@ -195,17 +206,17 @@ impl<'a> Iterator for Lexer<'a> {
                     return None;
                 }
                 // find the next delimiter
-                let loc = self.loc;
+                let loc = self.loc.clone();
                 match slice_split2(self.input, |c| {
-                    let delim = Delim::from_u8(*c);
-                    if delim.is_none() {
+                    let delim = Delimiter::try_from(*c);
+                    if delim.is_err() {
                         self.loc.col += 1;
                         if *c == b'\n' {
                             self.loc.col = 0;
                             self.loc.row += 1;
                         }
                     }
-                    delim
+                    delim.ok()
                 }) {
                     None => { // no delimiter
                         let chunk = self.input;
@@ -239,7 +250,7 @@ impl<'a> Iterator for Lexer<'a> {
             }
             // we still have a tag from the previous iteration
             Some((word, delim)) => {
-                let loc = self.loc;
+                let loc = self.loc.clone();
                 // assuming delimiters are never newlines
                 self.loc.col += word.len() + 1;
                 return Some(Token::Tag(loc, word, delim));
@@ -249,38 +260,30 @@ impl<'a> Iterator for Lexer<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Elem<T, L> {
+pub struct Elem<T> {
     pub name: T,
-    pub delim: DelimType,
-    pub children: Vec<Node<T, L>>,
-    pub loc: L,
+    pub delim: Delim,
+    pub children: Vec<Node<T>>,
+    pub loc: Loc,
 }
 
-type IntoTextNodesIter<T> =
-    ::std::iter::Chain<::std::iter::Chain<::std::iter::Once<T>,
-                                          ::std::iter::Once<T>>,
-                       ::std::vec::IntoIter<T>>;
-
-fn escape_delim<'a, L: Default>(delim: Delim<DelimType>)
-                                -> Node<&'a [u8], L> {
+fn escape_delim<'a>(delim: Delimiter) -> Node<&'a [u8]> {
     const ESCAPER_BYTES: &[u8] = &[ESCAPER];
     Node::Elem(Elem {
         name: ESCAPER_BYTES,
-        delim: DelimType::Parenthesis,
+        delim: Delim::Parenthesis,
         children: vec![Node::Text(delim.as_bytes())],
-        loc: L::default(),
+        loc: Default::default(),
     })
 }
 
-impl<'a, L> Elem<&'a [u8], L> {
+impl<'a> Elem<&'a [u8]> {
     /// Melt the node into a mix of text nodes and child nodes.
     /// The closing delimiter is not included.
-    fn into_text_nodes(self) -> IntoTextNodesIter<Node<&'a [u8], L>>
-        where L: Default {
-        use std::iter::once;
-        let delim = Delim::Open(self.delim);
-        once(Node::Text(self.name))
-            .chain(once(escape_delim(delim)))
+    fn into_text_nodes(self) -> impl Iterator<Item=Node<&'a [u8]>> {
+        let delim = self.delim.open();
+        iter::once(Node::Text(self.name))
+            .chain(iter::once(escape_delim(delim)))
             .chain(self.children.into_iter())
     }
 }
@@ -308,7 +311,7 @@ impl<'a> WriteTo for [u8] {
 
 pub enum NodeWriteState { Clean, Sticky }
 
-impl<'a, L> WriteTo for [Node<&'a [u8], L>] {
+impl<'a> WriteTo for [Node<&'a [u8]>] {
     type State = NodeWriteState;
     fn write_to<W>(&self, f: &mut W, s: &mut Self::State)
                    -> io::Result<()> where W: io::Write {
@@ -319,7 +322,7 @@ impl<'a, L> WriteTo for [Node<&'a [u8], L>] {
     }
 }
 
-impl<'a, L> WriteTo for Node<&'a [u8], L> {
+impl<'a> WriteTo for Node<&'a [u8]> {
     type State = NodeWriteState;
     fn write_to<W>(&self, f: &mut W, s: &mut Self::State)
                    -> io::Result<()> where W: io::Write {
@@ -337,12 +340,12 @@ impl<'a, L> WriteTo for Node<&'a [u8], L> {
                     [DIVIDER].write_to(f, &mut ())?;
                 }
                 elem.name.write_to(f, &mut ())?;
-                Delim::Open(elem.delim).as_bytes().write_to(f, &mut ())?;
+                elem.delim.open().as_bytes().write_to(f, &mut ())?;
                 elem.children.write_to(f, s)?;
                 if is_literal(elem.name) {
                     elem.name.write_to(f, &mut ())?;
                 }
-                Delim::Close(elem.delim).as_bytes().write_to(f, &mut ())?;
+                elem.delim.close().as_bytes().write_to(f, &mut ())?;
                 *s = NodeWriteState::Clean;
             },
         }
@@ -351,9 +354,9 @@ impl<'a, L> WriteTo for Node<&'a [u8], L> {
 }
 
 #[derive(Clone, Debug)]
-pub enum Node<T, L> {
-    Text(T),
-    Elem(Elem<T, L>),
+pub enum Node<S> {
+    Text(S),
+    Elem(Elem<S>),
 }
 
 pub fn is_literal(name: &[u8]) -> bool {
@@ -363,18 +366,19 @@ pub fn is_literal(name: &[u8]) -> bool {
     }
 }
 
-impl<'a> Node<&'a [u8], Loc<'a>> {
-    pub fn parse(s: &'a [u8], path: &'a str) ->(Vec<Self>, Vec<String>) {
-        Node::parse_tokens(Lexer::new(&s, Loc::new(path)))
+impl<'a> Node<&'a [u8]> {
+    pub fn parse(s: &'a [u8], path: Rc<String>) ->(Vec<Self>, Vec<String>) {
+        Node::parse_tokens(Lexer::new(&s, Loc::from(path)))
     }
 
-    fn parse_tokens<I: Iterator<Item=Token<'a>>>(tokens: I)
-                                                 -> (Vec<Self>, Vec<String>) {
+    fn parse_tokens<I>(tokens: I) -> (Vec<Self>, Vec<String>)
+        where I: Iterator<Item=Token<'a>>
+    {
         let mut errs = Vec::new();
         let mut stack = Vec::new();
         let mut top = Elem {
             name: &[] as &[u8],
-            delim: DelimType::Parenthesis,
+            delim: Delim::Parenthesis,
             children: Vec::new(),
             loc: Default::default(),
         };
@@ -389,7 +393,7 @@ impl<'a> Node<&'a [u8], Loc<'a>> {
                         top.children.push(Node::Text(word));
                         top.children.push(Node::Text(delim.as_bytes()));
                     }
-                    Delim::Open(dtype) => {
+                    Delimiter(Open, dtype) => {
                         stack.push(top);
                         top = Elem {
                             name: word,
@@ -398,12 +402,12 @@ impl<'a> Node<&'a [u8], Loc<'a>> {
                             loc: loc,
                         };
                     }
-                    Delim::Close(dtype) => {
+                    Delimiter(Close, dtype) => {
                         if !esc {
                             top.children.push(Node::Text(word));
                         }
                         if top.delim != dtype {
-                            let d = Delim::Open(top.delim);
+                            let d = Delimiter(Open, top.delim);
                             errs.push(format!(
                                 "{}: ‘{}’ doesn’t close ‘{}{}’ at {}",
                                 loc,
@@ -441,7 +445,7 @@ impl<'a> Node<&'a [u8], Loc<'a>> {
         }
         let mut nodes = mem::replace(match stack.first_mut() {
             Some(root) => {
-                let d = Delim::Open(top.delim).as_bytes();
+                let d = Delimiter(Open, top.delim).as_bytes();
                 errs.push(format!(
                     "{}: ‘{}{}’ was never closed",
                     top.loc,
@@ -452,7 +456,7 @@ impl<'a> Node<&'a [u8], Loc<'a>> {
             None => &mut top.children,
         }, Vec::new());
         // flatten the unclosed elements into text
-        for elem in stack.into_iter().chain(::std::iter::once(top)).skip(1) {
+        for elem in stack.into_iter().chain(iter::once(top)).skip(1) {
             nodes.extend(elem.into_text_nodes());
         }
         (nodes, errs)
@@ -460,14 +464,12 @@ impl<'a> Node<&'a [u8], Loc<'a>> {
 }
 
 pub fn load_file(path: &str) -> Vec<u8> {
-    use std::io::Read;
-    use std::fs::File;
-    let mut f = File::open(path).unwrap();
+    let mut f = std::fs::File::open(path).unwrap();
     let mut s = Vec::new();
     let _ = f.read_to_end(&mut s).unwrap();
     s
 }
 
-pub fn render_doc(nodes: &[Node<&[u8], Loc>]) -> Vec<u8> {
+pub fn render_doc(nodes: &[Node<&[u8]>]) -> Vec<u8> {
     write_to_vec(nodes, &mut NodeWriteState::Clean)
 }

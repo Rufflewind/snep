@@ -1,19 +1,19 @@
 extern crate snep;
 use std::io;
+use std::rc::Rc;
 use snep::parser::{self, Node, Elem};
 
-fn write_children<L, W: io::Write>(f: &mut W, elem: &Elem<&[u8], L>)
-                                   -> io::Result<()> {
+fn write_children<W: io::Write>(f: &mut W, elem: &Elem<&[u8]>)
+                                -> io::Result<()> {
     for child in &elem.children {
         write_html(child, f)?;
     }
     Ok(())
 }
 
-fn write_html<L, W: io::Write>(node: &Node<&[u8], L>, f: &mut W)
-                               -> io::Result<()> {
+fn write_html<W: io::Write>(node: &Node<&[u8]>, f: &mut W) -> io::Result<()> {
     // TODO: implement HTML escaping and sanity checks!
-    use parser::{Delim, WriteTo, is_literal};
+    use parser::{WriteTo, is_literal};
     match node {
         &Node::Text(t) => {
             f.write_all(t)?;
@@ -24,9 +24,9 @@ fn write_html<L, W: io::Write>(node: &Node<&[u8], L>, f: &mut W)
                 write_children(f, elem)?;
             } else if name.is_empty() || name.last() == Some(&b'=') {
                 f.write_all(name)?;
-                Delim::Open(elem.delim).as_bytes().write_to(f, &mut ())?;
+                elem.delim.open().as_bytes().write_to(f, &mut ())?;
                 write_children(f, elem)?;
-                Delim::Close(elem.delim).as_bytes().write_to(f, &mut ())?;
+                elem.delim.close().as_bytes().write_to(f, &mut ())?;
             } else if name == b"+" {
                 for child in &elem.children {
                     match child {
@@ -60,6 +60,7 @@ fn main() {
     }
     let path = &args[1];
     let s = parser::load_file(path);
+    let path = Rc::new(path.clone());
     let (nodes, errs) = parser::Node::parse(&s, path);
     for err in &errs {
         writeln!(stderr(), "{}", err).unwrap();
@@ -69,7 +70,10 @@ fn main() {
         exit(1);
     }
     let mut f = std::fs::File::create("output.html").unwrap();
-    for node in &nodes {
-        write_html(node, &mut f);
-    }
+    || -> io::Result<_> {
+        for node in &nodes {
+            write_html(node, &mut f)?;
+        }
+        Ok(())
+    } ().unwrap()
 }
