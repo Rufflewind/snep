@@ -1,0 +1,10 @@
+[package]
+name = "snep"
+version = "0.1.0"
+authors = ["Phil Ruffwind <rf@rufflewind.com>"]
+
+[dependencies]
+
+[[bin]]
+name = "snep"
+doc = false
