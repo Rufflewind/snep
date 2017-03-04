@@ -1,7 +1,9 @@
 use std::{self, fmt, iter, io, mem};
+use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::io::Read;
 use std::sync::Arc;
+use regex::bytes::Regex;
 use debug::debug_utf8;
 
 pub mod delimiter {
@@ -88,6 +90,13 @@ pub fn is_ascii_space(c: u8) -> bool {
     }
 }
 
+const ESCAPER: u8 = b'\\';
+const DIVIDER: u8 = b'|';
+
+fn is_word_char(c: u8) -> bool {
+    !(is_ascii_space(c) || c == DIVIDER || c == ESCAPER)
+}
+
 /// If `name` is empty, then the location is considered unknown.
 #[derive(Clone, Debug)]
 pub struct Loc {
@@ -101,9 +110,25 @@ pub struct Loc {
     pub col: usize,
 }
 
+impl Loc {
+    pub fn update<I: IntoIterator<Item=u8>>(&mut self, bytes: I) {
+        for c in bytes {
+            self.col += 1;
+            if c == b'\n' {
+                self.col = 0;
+                self.row += 1;
+            }
+        }
+    }
+}
+
 impl<'a> From<&'a str> for Loc {
     fn from(name: &'a str) -> Self {
-        Loc { name: Arc::new(String::from(name)), row: 0, col: 0 }
+        Loc {
+            name: Arc::new(String::from(name)),
+            row: 0,
+            col: 0,
+        }
     }
 }
 
@@ -125,22 +150,20 @@ impl fmt::Display for Loc {
 
 #[derive(Clone)]
 enum Token<'a>{
-    Chunk(Loc, &'a [u8]),
-    Tag(Loc, &'a [u8], Delimiter),
+    Chunk(&'a [u8]),
+    Tag(&'a [u8], Delimiter),
 }
 
 impl<'a> fmt::Debug for Token<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            &Token::Chunk(ref loc, ref s) => {
+            &Token::Chunk(ref s) => {
                 f.debug_tuple("Chunk")
-                    .field(loc)
                     .field(&debug_utf8(s))
                     .finish()
             }
-            &Token::Tag(ref loc, ref w, ref d) => {
+            &Token::Tag(ref w, ref d) => {
                 f.debug_tuple("Tag")
-                    .field(loc)
                     .field(&debug_utf8(w))
                     .field(&debug_utf8(&[d.to_u8()]))
                     .finish()
@@ -153,109 +176,75 @@ impl<'a> fmt::Debug for Token<'a> {
 struct Lexer<'a> {
     input: &'a [u8],
     loc: Loc,
-    state: Option<(&'a [u8], Delimiter)>,
+    queue: VecDeque<(Loc, Token<'a>)>,
 }
 
 impl<'a> Lexer<'a> {
     fn new(input: &'a [u8], loc: Loc) -> Self {
-        Lexer { input: input, loc: loc, state: None }
-    }
-}
-
-/// Find the element for which the predicate is true, and then make a split
-/// immediately afterwards.  If not found, returns `None`.
-fn slice_split2<T, R, F>(s: &[T], mut pred: F) -> Option<(&[T], R, &[T])>
-    where F: FnMut(&T) -> Option<R> {
-    for (i, c) in s.into_iter().enumerate() {
-        if let Some(r) = pred(c) {
-            return Some((s.split_at(i).0, r, s.split_at(i + 1).1));
+        Lexer {
+            input: input,
+            loc: loc,
+            queue: VecDeque::new(),
         }
     }
-    None
-}
 
-/// The first element is the longest suffix of elements that satisfies the
-/// predicate.  The second element is the remaining part.
-fn slice_rspan<T, F>(s: &[T], mut pred: F) -> (&[T], &[T])
-    where F: FnMut(&T) -> bool {
-    let mut j = s.len();
-    for (i, c) in s.into_iter().enumerate().rev() {
-        if !pred(c) {
-            break;
-        }
-        j = i;
+    fn push(&mut self, token: Token<'a>) {
+        self.queue.push_back((self.loc.clone(), token));
     }
-    let (suffix, rest) = s.split_at(j);
-    (rest, suffix)
-}
 
-const ESCAPER: u8 = b'\\';
-const DIVIDER: u8 = b'|';
+    fn refill(&mut self) {
+        use self::Token::*;
 
-fn is_word_char(c: u8) -> bool {
-    !(is_ascii_space(c) || c == DIVIDER || c == ESCAPER)
+        // end of input
+        if self.input.len() == 0 {
+            return;
+        }
+
+        lazy_static! {
+            static ref RE: Regex = Regex::new(concat!(
+                r"(?s)",
+                r"^(.*?)(",
+                r"(:?\\[^ \t\\|()\[\]{}]*)?[\])}]",
+                r"|",
+                r"[\\|]?[^ \t\\|()\[\]{}]*[(\[{]",
+                r")",
+            )).unwrap();
+        }
+        match RE.captures(self.input) {
+            None => {                   // last chunk
+                self.push(Chunk(self.input));
+                self.input = b"";
+            }
+            Some(caps) => {
+                self.input = self.input.split_at(caps.get(0).unwrap().end()).1;
+                let chunk = caps.get(1).unwrap().as_bytes();
+                let tag = caps.get(2).unwrap().as_bytes();
+
+                let (delim, word) = tag.split_last().unwrap();
+                let delim = Delimiter::try_from(*delim).unwrap();
+                let word = if let Some((&b'|', word)) = word.split_first() {
+                    word
+                } else {
+                    word
+                };
+
+                self.push(Chunk(chunk));
+                self.loc.update(chunk.iter().cloned());
+                self.push(Tag(word, delim));
+                self.loc.update(tag.iter().cloned());
+            }
+        }
+    }
 }
 
 impl<'a> Iterator for Lexer<'a> {
-    type Item = Token<'a>;
+    type Item = (Loc, Token<'a>);
+
     fn next(&mut self) -> Option<Self::Item> {
-        match mem::replace(&mut self.state, None) {
-            None => {
-                // end of input
-                if self.input.len() == 0 {
-                    return None;
-                }
-                // find the next delimiter
-                let loc = self.loc.clone();
-                match slice_split2(self.input, |c| {
-                    let delim = Delimiter::try_from(*c);
-                    if delim.is_err() {
-                        self.loc.col += 1;
-                        if *c == b'\n' {
-                            self.loc.col = 0;
-                            self.loc.row += 1;
-                        }
-                    }
-                    delim.ok()
-                }) {
-                    None => { // no delimiter
-                        let chunk = self.input;
-                        self.input = &[];
-                        Some(Token::Chunk(loc, chunk))
-                    }
-                    Some((pre, delim, input)) => { // found delimiter
-                        self.input = input;
-                        let mut stop = false;
-                        let (word, chunk) = slice_rspan(pre, |&c| {
-                            match c {
-                                ESCAPER => {
-                                    stop = true;
-                                    true
-                                },
-                                _ => {
-                                    !stop && is_word_char(c)
-                                }
-                            }
-                        });
-                        let chunk = match chunk.split_last() {
-                            Some((&c, rest)) if c == DIVIDER => rest,
-                            _ => chunk,
-                        };
-                        // assuming words can never contain newlines
-                        self.loc.col -= word.len();
-                        self.state = Some((word, delim));
-                        Some(Token::Chunk(loc, chunk))
-                    }
-                }
-            }
-            // we still have a tag from the previous iteration
-            Some((word, delim)) => {
-                let loc = self.loc.clone();
-                // assuming delimiters are never newlines
-                self.loc.col += word.len() + 1;
-                return Some(Token::Tag(loc, word, delim));
-            }
+        if self.queue.is_empty() {
+            self.refill()
         }
+        self.queue.pop_front()
     }
 }
 
@@ -372,7 +361,7 @@ impl<'a> Node<&'a [u8]> {
     }
 
     fn parse_tokens<I>(tokens: I) -> (Vec<Self>, Vec<String>)
-        where I: Iterator<Item=Token<'a>>
+        where I: Iterator<Item=(Loc, Token<'a>)>
     {
         let mut errs = Vec::new();
         let mut stack = Vec::new();
@@ -385,10 +374,10 @@ impl<'a> Node<&'a [u8]> {
         for token in tokens {
             let esc = is_literal(top.name);
             match token {
-                Token::Chunk(_, s) => {
+                (_, Token::Chunk(s)) => {
                     top.children.push(Node::Text(s));
                 }
-                Token::Tag(loc, word, delim) => match delim {
+                (loc, Token::Tag(word, delim)) => match delim {
                     _ if esc && top.name != word => {
                         top.children.push(Node::Text(word));
                         top.children.push(Node::Text(delim.as_bytes()));

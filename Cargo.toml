@@ -4,6 +4,8 @@ version = "0.1.0"
 authors = ["Phil Ruffwind <rf@rufflewind.com>"]
 
 [dependencies]
+"lazy_static" = "^0.2.2"
+"regex" = "^0.2.1"
 
 [[bin]]
 name = "snep"
