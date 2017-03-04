@@ -1,6 +1,5 @@
 extern crate snep;
 use std::io;
-use std::rc::Rc;
 use snep::parser::{self, Node, Elem};
 
 fn write_children<W: io::Write>(f: &mut W, elem: &Elem<&[u8]>)
@@ -60,7 +59,6 @@ fn main() {
     }
     let path = &args[1];
     let s = parser::load_file(path);
-    let path = Rc::new(path.clone());
     let (nodes, errs) = parser::Node::parse(&s, path);
     for err in &errs {
         writeln!(stderr(), "{}", err).unwrap();

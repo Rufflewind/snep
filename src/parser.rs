@@ -1,7 +1,7 @@
 use std::{self, fmt, iter, io, mem};
 use std::convert::TryFrom;
 use std::io::Read;
-use std::rc::Rc;
+use std::sync::Arc;
 use debug::debug_utf8;
 
 pub mod delimiter {
@@ -92,7 +92,7 @@ pub fn is_ascii_space(c: u8) -> bool {
 #[derive(Clone, Debug)]
 pub struct Loc {
     /// Name of the file.
-    pub name: Rc<String>,
+    pub name: Arc<String>,
 
     /// Zero-based line number.
     pub row: usize,
@@ -101,15 +101,15 @@ pub struct Loc {
     pub col: usize,
 }
 
-impl From<Rc<String>> for Loc {
-    fn from(name: Rc<String>) -> Self {
-        Loc { name: name, row: 0, col: 0 }
+impl<'a> From<&'a str> for Loc {
+    fn from(name: &'a str) -> Self {
+        Loc { name: Arc::new(String::from(name)), row: 0, col: 0 }
     }
 }
 
 impl Default for Loc {
     fn default() -> Self {
-        Loc::from(Rc::new(Default::default()))
+        Loc::from(<&str>::default())
     }
 }
 
@@ -367,7 +367,7 @@ pub fn is_literal(name: &[u8]) -> bool {
 }
 
 impl<'a> Node<&'a [u8]> {
-    pub fn parse(s: &'a [u8], path: Rc<String>) ->(Vec<Self>, Vec<String>) {
+    pub fn parse(s: &'a [u8], path: &str) ->(Vec<Self>, Vec<String>) {
         Node::parse_tokens(Lexer::new(&s, Loc::from(path)))
     }
 
