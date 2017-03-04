@@ -2,51 +2,54 @@ extern crate snep;
 use std::io;
 use snep::parser::{self, Node, Elem};
 
-fn write_children<W: io::Write>(f: &mut W, elem: &Elem)
-                                -> io::Result<()> {
-    for child in &elem.children {
-        write_html(child, f)?;
+struct Html<'a>(&'a [Node]);
+
+impl<'a> std::fmt::Display for Html<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        for child in self.0 {
+            HtmlNode(child).fmt(f)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
-fn write_html<W: io::Write>(node: &Node, f: &mut W) -> io::Result<()> {
-    // TODO: implement HTML escaping and sanity checks!
-    use parser::{WriteTo, is_literal};
-    match node {
-        &Node::Text(ref t) => {
-            f.write_all(t)?;
-        }
-        &Node::Elem(ref elem) => {
-            let name = &elem.name;
-            if is_literal(name) {
-                write_children(f, elem)?;
-            } else if name.is_empty() || name.last() == Some(&b'=') {
-                f.write_all(name)?;
-                elem.delim.open().as_bytes().write_to(f, &mut ())?;
-                write_children(f, elem)?;
-                elem.delim.close().as_bytes().write_to(f, &mut ())?;
-            } else if name.as_bytes() == b"+" {
-                for child in &elem.children {
-                    match child {
-                        &Node::Elem(ref elem) => {
-                            write_children(f, elem)?;
-                        }
-                        _ => {}
-                    }
-                }
-            } else {
-                f.write_all("<".as_bytes())?;
-                f.write_all(name)?;
-                f.write_all(">".as_bytes())?;
-                write_children(f, elem)?;
-                f.write_all("</".as_bytes())?;
-                f.write_all(name)?;
-                f.write_all(">".as_bytes())?;
+struct HtmlNode<'a>(&'a Node);
+
+impl<'a> std::fmt::Display for HtmlNode<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        // TODO: implement HTML escaping and sanity checks!
+        use parser::is_literal;
+        match self.0 {
+            &Node::Text(ref t) => {
+                t.fmt(f)?;
             }
-        },
+            &Node::Elem(ref elem) => {
+                let name = &elem.name;
+                if is_literal(name) {
+                    Html(&elem.children).fmt(f)?;
+                } else if name.is_empty() || name.ends_with("=") {
+                    name.fmt(f)?;
+                    elem.delim.open().fmt(f);
+                    Html(&elem.children).fmt(f)?;
+                    elem.delim.close().fmt(f);
+                } else if (name as &str) == "+" {
+                    for child in &elem.children {
+                        match child {
+                            &Node::Elem(ref elem) => {
+                                Html(&elem.children).fmt(f)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                } else {
+                    f.write_str(&format!("<{}>", name))?;
+                    Html(&elem.children).fmt(f)?;
+                    f.write_str(&format!("</{}>", name))?;
+                }
+            },
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn main() {
@@ -63,15 +66,10 @@ fn main() {
     for err in &errs {
         writeln!(stderr(), "{}", err).unwrap();
     }
-    print!("{}", String::from_utf8_lossy(&parser::render_doc(&nodes)));
+    print!("{}", parser::Nodes(nodes.iter()));
     if !errs.is_empty() {
         exit(1);
     }
     let mut f = std::fs::File::create("output.html").unwrap();
-    || -> io::Result<_> {
-        for node in &nodes {
-            write_html(node, &mut f)?;
-        }
-        Ok(())
-    } ().unwrap()
+    write!(f, "{}", Html(&nodes)).unwrap();
 }

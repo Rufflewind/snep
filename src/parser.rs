@@ -1,13 +1,15 @@
-use std::{self, fmt, iter, io, mem};
+use std::{self, iter, io, mem};
+use std::borrow::Borrow;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::io::Read;
 use std::sync::Arc;
-use regex::bytes::Regex;
-use debug::debug_utf8;
+use regex::Regex;
 
 pub mod delimiter {
     use std;
+    use std::borrow::Borrow;
     use self::Direction::*;
     use self::Delim::*;
 
@@ -46,35 +48,60 @@ pub mod delimiter {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub struct Delimiter(pub Direction, pub Delim);
 
-    impl std::convert::TryFrom<u8> for Delimiter {
+    impl Delimiter {
+        pub fn as_char(self) -> char {
+            self.as_str().chars().next().unwrap()
+        }
+
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Delimiter(Open, Parenthesis) => "(",
+                Delimiter(Close, Parenthesis) => ")",
+                Delimiter(Open, Bracket) => "[",
+                Delimiter(Close, Bracket) => "]",
+                Delimiter(Open, Brace) => "{",
+                Delimiter(Close, Brace) => "}",
+            }
+        }
+    }
+
+    impl std::convert::TryFrom<char> for Delimiter {
         type Err = ();
-        fn try_from(d: u8) -> Result<Self, Self::Err> {
+        fn try_from(d: char) -> Result<Self, Self::Err> {
             match d {
-                b'(' => Ok(Delimiter(Open, Parenthesis)),
-                b')' => Ok(Delimiter(Close, Parenthesis)),
-                b'[' => Ok(Delimiter(Open, Bracket)),
-                b']' => Ok(Delimiter(Close, Bracket)),
-                b'{' => Ok(Delimiter(Open, Brace)),
-                b'}' => Ok(Delimiter(Close, Brace)),
+                '(' => Ok(Delimiter(Open, Parenthesis)),
+                ')' => Ok(Delimiter(Close, Parenthesis)),
+                '[' => Ok(Delimiter(Open, Bracket)),
+                ']' => Ok(Delimiter(Close, Bracket)),
+                '{' => Ok(Delimiter(Open, Brace)),
+                '}' => Ok(Delimiter(Close, Brace)),
                 _ => Err(()),
             }
         }
     }
 
-    impl Delimiter {
-        pub fn as_u8(self) -> u8 {
-            self.as_bytes()[0]
+    impl AsRef<str> for Delimiter {
+        fn as_ref(&self) -> &str {
+            self.borrow()
         }
+    }
 
-        pub fn as_bytes(self) -> &'static [u8] {
-            match self {
-                Delimiter(Open, Parenthesis) => b"(",
-                Delimiter(Close, Parenthesis) => b")",
-                Delimiter(Open, Bracket) => b"[",
-                Delimiter(Close, Bracket) => b"]",
-                Delimiter(Open, Brace) => b"{",
-                Delimiter(Close, Brace) => b"}",
-            }
+    impl Borrow<str> for Delimiter {
+        fn borrow(&self) -> &str {
+            self.as_str()
+        }
+    }
+
+    impl std::ops::Deref for Delimiter {
+        type Target = str;
+        fn deref(&self) -> &Self::Target {
+            &self.as_str()
+        }
+    }
+
+    impl std::fmt::Display for Delimiter {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str(self.as_str())
         }
     }
 }
@@ -82,19 +109,14 @@ pub mod delimiter {
 use self::delimiter::Direction::*;
 use self::delimiter::{Delim, Delimiter};
 
-pub fn is_ascii_space(c: u8) -> bool {
-    match c {
-        b' ' => true,
-        _ if c >= 0x9 && c < 0xe => true,
-        _ => false,
-    }
-}
+const ESCAPER: char = '\\';
+const DIVIDER: char = '|';
 
-const ESCAPER: u8 = b'\\';
-const DIVIDER: u8 = b'|';
-
-fn is_word_char(c: u8) -> bool {
-    !(is_ascii_space(c) || c == DIVIDER || c == ESCAPER)
+fn is_word_char(c: char) -> bool {
+    !(Delimiter::try_from(c).is_ok() ||
+      c.is_whitespace() ||
+      c == ESCAPER ||
+      c == DIVIDER)
 }
 
 /// If `name` is empty, then the location is considered unknown.
@@ -111,10 +133,10 @@ pub struct Loc {
 }
 
 impl Loc {
-    pub fn update<I: IntoIterator<Item=u8>>(&mut self, bytes: I) {
+    pub fn update<I: IntoIterator<Item=char>>(&mut self, bytes: I) {
         for c in bytes {
             self.col += 1;
-            if c == b'\n' {
+            if c == '\n' {
                 self.col = 0;
                 self.row += 1;
             }
@@ -138,8 +160,8 @@ impl Default for Loc {
     }
 }
 
-impl fmt::Display for Loc {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl std::fmt::Display for Loc {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         if self.name.is_empty() {
             write!(f, "<unknown>")
         } else {
@@ -148,39 +170,21 @@ impl fmt::Display for Loc {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Token<'a> {
-    Chunk(&'a [u8]),
-    Tag(&'a [u8], Delimiter),
-}
-
-impl<'a> fmt::Debug for Token<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            &Token::Chunk(ref s) => {
-                f.debug_tuple("Chunk")
-                    .field(&debug_utf8(s))
-                    .finish()
-            }
-            &Token::Tag(ref w, ref d) => {
-                f.debug_tuple("Tag")
-                    .field(&debug_utf8(w))
-                    .field(&debug_utf8(&[d.as_u8()]))
-                    .finish()
-            }
-        }
-    }
+    Chunk(&'a str),
+    Tag(&'a str, Delimiter),
 }
 
 #[derive(Clone, Debug)]
 struct Lexer<'a> {
-    input: &'a [u8],
+    input: &'a str,
     loc: Loc,
     queue: VecDeque<(Loc, Token<'a>)>,
 }
 
 impl<'a> Lexer<'a> {
-    fn new(input: &'a [u8], loc: Loc) -> Self {
+    fn new(input: &'a str, loc: Loc) -> Self {
         Lexer {
             input: input,
             loc: loc,
@@ -204,34 +208,32 @@ impl<'a> Lexer<'a> {
             static ref RE: Regex = Regex::new(concat!(
                 r"(?s)",
                 r"^(.*?)(",
-                r"(:?\\[^ \t\\|()\[\]{}]*)?[\])}]",
+                r"(:?\\[^\s\\|()\[\]{}]*)?[\])}]",
                 r"|",
-                r"[\\|]?[^ \t\\|()\[\]{}]*[(\[{]",
+                r"[\\|]?[^\s\\|()\[\]{}]*[(\[{]",
                 r")",
             )).unwrap();
         }
         match RE.captures(self.input) {
             None => {                   // last chunk
                 self.push(Chunk(self.input));
-                self.input = b"";
+                self.input = "";
             }
             Some(caps) => {
                 self.input = self.input.split_at(caps.get(0).unwrap().end()).1;
-                let chunk = caps.get(1).unwrap().as_bytes();
-                let tag = caps.get(2).unwrap().as_bytes();
+                let chunk = caps.get(1).unwrap().as_str();
+                let tag = caps.get(2).unwrap().as_str();
 
-                let (delim, word) = tag.split_last().unwrap();
-                let delim = Delimiter::try_from(*delim).unwrap();
-                let word = if let Some((&b'|', word)) = word.split_first() {
-                    word
-                } else {
-                    word
-                };
+                let last_i = tag.char_indices().last().unwrap().0;
+                let (word, delim) = tag.split_at(last_i);
+                let delim = delim.chars().next().unwrap();
+                let delim = Delimiter::try_from(delim).unwrap();
+                let word = word.trim_left_matches('|');
 
                 self.push(Chunk(chunk));
-                self.loc.update(chunk.iter().cloned());
+                self.loc.update(chunk.chars());
                 self.push(Tag(word, delim));
-                self.loc.update(tag.iter().cloned());
+                self.loc.update(tag.chars());
             }
         }
     }
@@ -250,93 +252,78 @@ impl<'a> Iterator for Lexer<'a> {
 
 /// Stores binary data.
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Blob(Arc<Box<[u8]>>);
+pub struct Text(Arc<String>);
 
-impl Blob {
-    pub fn as_bytes(&self) -> &[u8] {
-        self
-    }
-
-    pub fn as_utf8(&self) -> Result<&str, std::str::Utf8Error> {
-        std::str::from_utf8(&self)
+impl From<String> for Text {
+    fn from(s: String) -> Self {
+        Text(Arc::from(s))
     }
 }
 
-impl From<Box<[u8]>> for Blob {
-    fn from(s: Box<[u8]>) -> Self {
-        Blob(Arc::new(s))
-    }
-}
-
-impl From<Vec<u8>> for Blob {
-    fn from(s: Vec<u8>) -> Self {
-        Self::from(s.into_boxed_slice())
-    }
-}
-
-impl<'a> From<&'a [u8]> for Blob {
-    fn from(s: &'a [u8]) -> Self {
-        Self::from(s.to_vec())
-    }
-}
-
-impl<'a> From<&'a str> for Blob {
+impl<'a> From<&'a str> for Text {
     fn from(s: &'a str) -> Self {
-        Self::from(s.as_bytes())
+        Self::from(String::from(s))
     }
 }
 
-impl std::borrow::Borrow<[u8]> for Blob {
-    fn borrow(&self) -> &[u8] {
+impl std::convert::AsRef<String> for Text {
+    fn as_ref(&self) -> &String {
         self
     }
 }
 
-impl std::convert::AsRef<[u8]> for Blob {
-    fn as_ref(&self) -> &[u8] {
+impl std::convert::AsRef<str> for Text {
+    fn as_ref(&self) -> &str {
+        self.borrow()
+    }
+}
+
+impl Borrow<String> for Text {
+    fn borrow(&self) -> &String {
         self
     }
 }
 
-impl std::ops::Deref for Blob {
-    type Target = [u8];
-    fn deref(&self) -> &[u8] {
+impl Borrow<str> for Text {
+    fn borrow(&self) -> &str {
         &self.0
     }
 }
 
-impl fmt::Debug for Blob {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("Blob")
-            .field(&debug_utf8(self))
-            .finish()
+impl std::ops::Deref for Text {
+    type Target = String;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
-impl<'a, 'b> std::ops::Add<&'b Blob> for &'a Blob{
-    type Output = Blob;
-    fn add(self, rhs: &'b Blob) -> Self::Output {
-        let mut v = self.0.to_vec();
-        v.extend(rhs.iter());
-        Blob(Arc::new(v.into_boxed_slice()))
+impl std::fmt::Debug for Text {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_tuple("Text").field(self).finish()
+    }
+}
+
+impl std::fmt::Display for Text {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        (self as &str).fmt(f)
+    }
+}
+
+impl<'a, 'b> std::ops::Add<&'b Text> for &'a Text {
+    type Output = Text;
+    fn add(self, rhs: &'b Text) -> Self::Output {
+        let s: &String = self.borrow();
+        let mut s = s.clone();
+        Text::from(s + (rhs as &str))
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Elem {
-    pub name: Blob,
+    pub name: Text,
     pub delim: Delim,
     pub children: Vec<Node>,
     pub loc: Loc,
-}
-
-fn escape_delim<'a>(delim: Delimiter) -> Node {
-    Node::Elem(Elem {
-        name: Blob::from(&[ESCAPER] as &[u8]),
-        delim: Delim::Parenthesis,
-        children: vec![Node::from(delim.as_bytes())],
-        loc: Default::default(),
-    })
 }
 
 impl Elem {
@@ -345,104 +332,42 @@ impl Elem {
     fn into_text_nodes(self) -> impl Iterator<Item=Node> {
         let delim = self.delim.open();
         iter::once(Node::Text(self.name))
-            .chain(iter::once(escape_delim(delim)))
+            .chain(iter::once(Node::escape_delim(delim)))
             .chain(self.children.into_iter())
-    }
-}
-
-pub trait WriteTo {
-    type State;
-    fn write_to<W>(&self, f: &mut W, s: &mut Self::State)
-                   -> io::Result<()> where W: io::Write;
-}
-
-fn write_to_vec<T: ?Sized>(x: &T, s: &mut T::State)
-                           -> Vec<u8> where T: WriteTo {
-    let mut v = Vec::new();
-    x.write_to(&mut v, s).unwrap();
-    v
-}
-
-impl<'a> WriteTo for [u8] {
-    type State = ();
-    fn write_to<W>(&self, f: &mut W, _: &mut Self::State)
-                   -> io::Result<()> where W: io::Write {
-        f.write_all(self)
-    }
-}
-
-pub enum NodeWriteState { Clean, Sticky }
-
-impl<'a> WriteTo for [Node] {
-    type State = NodeWriteState;
-    fn write_to<W>(&self, f: &mut W, s: &mut Self::State)
-                   -> io::Result<()> where W: io::Write {
-        for x in self {
-            x.write_to(f, s)?
-        }
-        Ok(())
-    }
-}
-
-impl WriteTo for Node {
-    type State = NodeWriteState;
-    fn write_to<W>(&self, f: &mut W, s: &mut Self::State)
-                   -> io::Result<()> where W: io::Write {
-        match self {
-            &Node::Text(ref t) => {
-                t.write_to(f, &mut ())?;
-                if is_word_char(*t.last().unwrap_or(&b' ')) {
-                    *s = NodeWriteState::Sticky;
-                } else {
-                    *s = NodeWriteState::Clean;
-                }
-            }
-            &Node::Elem(ref elem) => {
-                if let &mut NodeWriteState::Sticky = s {
-                    [DIVIDER].write_to(f, &mut ())?;
-                }
-                elem.name.write_to(f, &mut ())?;
-                elem.delim.open().as_bytes().write_to(f, &mut ())?;
-                elem.children.write_to(f, s)?;
-                if is_literal(&elem.name) {
-                    elem.name.write_to(f, &mut ())?;
-                }
-                elem.delim.close().as_bytes().write_to(f, &mut ())?;
-                *s = NodeWriteState::Clean;
-            },
-        }
-        Ok(())
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum Node {
-    Text(Blob),
+    Text(Text),
     Elem(Elem),
-}
-
-impl<'a> From<&'a [u8]> for Node {
-    fn from(s: &'a [u8]) -> Self {
-        Node::Text(Blob::from(s))
-    }
 }
 
 impl<'a> From<&'a str> for Node {
     fn from(s: &'a str) -> Self {
-        Node::Text(Blob::from(s))
+        Node::Text(Text::from(s))
     }
 }
 
-pub fn is_literal(name: &[u8]) -> bool {
-    match name.first() {
-        Some(&ESCAPER) => true,
+pub fn is_literal(name: &str) -> bool {
+    match name.chars().next() {
+        Some(ESCAPER) => true,
         _ => false,
     }
 }
 
 impl Node {
-    pub fn parse(s: &[u8], path: &str) ->(Vec<Self>, Vec<String>) {
+    pub fn parse(s: &str, path: &str) ->(Vec<Self>, Vec<String>) {
         Node::parse_tokens(Lexer::new(&s, Loc::from(path)))
+    }
+
+    fn escape_delim<'a>(delim: Delimiter) -> Self {
+        Node::Elem(Elem {
+            name: Text::from(ESCAPER.to_string()),
+            delim: Delim::Parenthesis,
+            children: vec![Node::from(delim.borrow())],
+            loc: Default::default(),
+        })
     }
 
     fn parse_tokens<'a, I>(tokens: I) -> (Vec<Self>, Vec<String>)
@@ -451,7 +376,7 @@ impl Node {
         let mut errs = Vec::new();
         let mut stack = Vec::new();
         let mut top = Elem {
-            name: Blob::default(),
+            name: Text::default(),
             delim: Delim::Parenthesis,
             children: Vec::new(),
             loc: Default::default(),
@@ -463,14 +388,14 @@ impl Node {
                     top.children.push(Node::from(s));
                 }
                 (loc, Token::Tag(word, delim)) => match delim {
-                    _ if esc && top.name.as_bytes() != word => {
+                    _ if esc && (&top.name as &str) != word => {
                         top.children.push(Node::from(word));
-                        top.children.push(Node::from(delim.as_bytes()));
+                        top.children.push(Node::from(delim.borrow()));
                     }
                     Delimiter(Open, dtype) => {
                         stack.push(top);
                         top = Elem {
-                            name: Blob::from(word),
+                            name: Text::from(word),
                             delim: dtype,
                             children: Vec::new(),
                             loc: loc,
@@ -484,23 +409,19 @@ impl Node {
                             let d = Delimiter(Open, top.delim);
                             errs.push(format!(
                                 "{}: ‘{}’ doesn’t close ‘{}{}’ at {}",
-                                loc,
-                                String::from_utf8_lossy(delim.as_bytes()),
-                                debug_utf8(&top.name),
-                                String::from_utf8_lossy(d.as_bytes()),
-                                top.loc));
-                            top.children.push(escape_delim(d));
+                                loc, delim, top.name, d, top.loc));
+                            top.children.push(Self::escape_delim(d));
                         } else {
                             match stack.pop() {
                                 None => {
                                     // we're at root level (which is never
                                     // an escaping context), so there's
                                     // nothing to close
-                                    let d = delim.as_bytes();
                                     errs.push(format!(
                                         "{}: ‘{}’ doesn’t close anything",
-                                        loc, String::from_utf8_lossy(d)));
-                                    top.children.push(Node::from(d));
+                                        loc, delim));
+                                    top.children.push(Node::from(
+                                        delim.borrow()));
                                 }
                                 Some(mut new_top) => {
                                     new_top.children.push(Node::Elem(Elem {
@@ -519,12 +440,9 @@ impl Node {
         }
         let mut nodes = mem::replace(match stack.first_mut() {
             Some(root) => {
-                let d = Delimiter(Open, top.delim).as_bytes();
                 errs.push(format!(
                     "{}: ‘{}{}’ was never closed",
-                    top.loc,
-                    String::from_utf8_lossy(&top.name),
-                    String::from_utf8_lossy(&d)));
+                    top.loc, top.name, top.delim.open()));
                 &mut root.children
             }
             None => &mut top.children,
@@ -535,15 +453,76 @@ impl Node {
         }
         (nodes, errs)
     }
+
+    pub fn as_mid<'a>(&'a self, state: &'a mut NodeFmtState) -> MidNode<'a> {
+        MidNode {
+            state: RefCell::new(state),
+            node: self,
+        }
+    }
 }
 
-pub fn load_file(path: &str) -> Vec<u8> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NodeFmtState { Clean, Sticky }
+
+impl Default for NodeFmtState {
+    fn default() -> Self {
+        NodeFmtState::Clean
+    }
+}
+
+pub struct Nodes<I>(pub I);
+
+impl<'a, I> std::fmt::Display for Nodes<I>
+    where I: Clone + Iterator<Item=&'a Node>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let mut state = NodeFmtState::Clean;
+        for node in self.0.clone() {
+            node.as_mid(&mut state).fmt(f)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct MidNode<'a> {
+    state: RefCell<&'a mut NodeFmtState>,
+    node: &'a Node,
+}
+
+impl<'a> std::fmt::Display for MidNode<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let mut state = self.state.borrow_mut();
+        match self.node {
+            &Node::Text(ref t) => {
+                t.fmt(f)?;
+                if is_word_char(t.chars().last().unwrap_or(' ')) {
+                    **state = NodeFmtState::Sticky;
+                } else {
+                    **state = NodeFmtState::Clean;
+                }
+            }
+            &Node::Elem(ref elem) => {
+                if let NodeFmtState::Sticky = **state {
+                    f.write_str(&DIVIDER.to_string())?;
+                }
+                elem.name.fmt(f)?;
+                elem.delim.open().fmt(f)?;
+                Nodes(elem.children.iter()).fmt(f)?;
+                if is_literal(&elem.name) {
+                    elem.name.fmt(f)?;
+                }
+                elem.delim.close().fmt(f)?;
+                **state = NodeFmtState::Clean;
+            },
+        }
+        Ok(())
+    }
+}
+
+pub fn load_file(path: &str) -> String {
     let mut f = std::fs::File::open(path).unwrap();
-    let mut s = Vec::new();
-    let _ = f.read_to_end(&mut s).unwrap();
+    let mut s = Default::default();
+    let _ = f.read_to_string(&mut s).unwrap();
     s
-}
-
-pub fn render_doc(nodes: &[Node]) -> Vec<u8> {
-    write_to_vec(nodes, &mut NodeWriteState::Clean)
 }
