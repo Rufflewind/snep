@@ -62,7 +62,7 @@ pub mod delimiter {
     }
 
     impl Delimiter {
-        pub fn to_u8(self) -> u8 {
+        pub fn as_u8(self) -> u8 {
             self.as_bytes()[0]
         }
 
@@ -148,8 +148,8 @@ impl fmt::Display for Loc {
     }
 }
 
-#[derive(Clone)]
-enum Token<'a>{
+#[derive(Clone, Copy)]
+enum Token<'a> {
     Chunk(&'a [u8]),
     Tag(&'a [u8], Delimiter),
 }
@@ -165,7 +165,7 @@ impl<'a> fmt::Debug for Token<'a> {
             &Token::Tag(ref w, ref d) => {
                 f.debug_tuple("Tag")
                     .field(&debug_utf8(w))
-                    .field(&debug_utf8(&[d.to_u8()]))
+                    .field(&debug_utf8(&[d.as_u8()]))
                     .finish()
             }
         }
@@ -248,28 +248,101 @@ impl<'a> Iterator for Lexer<'a> {
     }
 }
 
+/// Stores binary data.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Blob(Arc<Box<[u8]>>);
+
+impl Blob {
+    pub fn as_bytes(&self) -> &[u8] {
+        self
+    }
+
+    pub fn as_utf8(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(&self)
+    }
+}
+
+impl From<Box<[u8]>> for Blob {
+    fn from(s: Box<[u8]>) -> Self {
+        Blob(Arc::new(s))
+    }
+}
+
+impl From<Vec<u8>> for Blob {
+    fn from(s: Vec<u8>) -> Self {
+        Self::from(s.into_boxed_slice())
+    }
+}
+
+impl<'a> From<&'a [u8]> for Blob {
+    fn from(s: &'a [u8]) -> Self {
+        Self::from(s.to_vec())
+    }
+}
+
+impl<'a> From<&'a str> for Blob {
+    fn from(s: &'a str) -> Self {
+        Self::from(s.as_bytes())
+    }
+}
+
+impl std::borrow::Borrow<[u8]> for Blob {
+    fn borrow(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::convert::AsRef<[u8]> for Blob {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::ops::Deref for Blob {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Blob {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Blob")
+            .field(&debug_utf8(self))
+            .finish()
+    }
+}
+
+impl<'a, 'b> std::ops::Add<&'b Blob> for &'a Blob{
+    type Output = Blob;
+    fn add(self, rhs: &'b Blob) -> Self::Output {
+        let mut v = self.0.to_vec();
+        v.extend(rhs.iter());
+        Blob(Arc::new(v.into_boxed_slice()))
+    }
+}
+
 #[derive(Clone, Debug)]
-pub struct Elem<T> {
-    pub name: T,
+pub struct Elem {
+    pub name: Blob,
     pub delim: Delim,
-    pub children: Vec<Node<T>>,
+    pub children: Vec<Node>,
     pub loc: Loc,
 }
 
-fn escape_delim<'a>(delim: Delimiter) -> Node<&'a [u8]> {
-    const ESCAPER_BYTES: &[u8] = &[ESCAPER];
+fn escape_delim<'a>(delim: Delimiter) -> Node {
     Node::Elem(Elem {
-        name: ESCAPER_BYTES,
+        name: Blob::from(&[ESCAPER] as &[u8]),
         delim: Delim::Parenthesis,
-        children: vec![Node::Text(delim.as_bytes())],
+        children: vec![Node::from(delim.as_bytes())],
         loc: Default::default(),
     })
 }
 
-impl<'a> Elem<&'a [u8]> {
+impl Elem {
     /// Melt the node into a mix of text nodes and child nodes.
     /// The closing delimiter is not included.
-    fn into_text_nodes(self) -> impl Iterator<Item=Node<&'a [u8]>> {
+    fn into_text_nodes(self) -> impl Iterator<Item=Node> {
         let delim = self.delim.open();
         iter::once(Node::Text(self.name))
             .chain(iter::once(escape_delim(delim)))
@@ -300,7 +373,7 @@ impl<'a> WriteTo for [u8] {
 
 pub enum NodeWriteState { Clean, Sticky }
 
-impl<'a> WriteTo for [Node<&'a [u8]>] {
+impl<'a> WriteTo for [Node] {
     type State = NodeWriteState;
     fn write_to<W>(&self, f: &mut W, s: &mut Self::State)
                    -> io::Result<()> where W: io::Write {
@@ -311,12 +384,12 @@ impl<'a> WriteTo for [Node<&'a [u8]>] {
     }
 }
 
-impl<'a> WriteTo for Node<&'a [u8]> {
+impl WriteTo for Node {
     type State = NodeWriteState;
     fn write_to<W>(&self, f: &mut W, s: &mut Self::State)
                    -> io::Result<()> where W: io::Write {
         match self {
-            &Node::Text(t) => {
+            &Node::Text(ref t) => {
                 t.write_to(f, &mut ())?;
                 if is_word_char(*t.last().unwrap_or(&b' ')) {
                     *s = NodeWriteState::Sticky;
@@ -331,7 +404,7 @@ impl<'a> WriteTo for Node<&'a [u8]> {
                 elem.name.write_to(f, &mut ())?;
                 elem.delim.open().as_bytes().write_to(f, &mut ())?;
                 elem.children.write_to(f, s)?;
-                if is_literal(elem.name) {
+                if is_literal(&elem.name) {
                     elem.name.write_to(f, &mut ())?;
                 }
                 elem.delim.close().as_bytes().write_to(f, &mut ())?;
@@ -343,9 +416,21 @@ impl<'a> WriteTo for Node<&'a [u8]> {
 }
 
 #[derive(Clone, Debug)]
-pub enum Node<S> {
-    Text(S),
-    Elem(Elem<S>),
+pub enum Node {
+    Text(Blob),
+    Elem(Elem),
+}
+
+impl<'a> From<&'a [u8]> for Node {
+    fn from(s: &'a [u8]) -> Self {
+        Node::Text(Blob::from(s))
+    }
+}
+
+impl<'a> From<&'a str> for Node {
+    fn from(s: &'a str) -> Self {
+        Node::Text(Blob::from(s))
+    }
 }
 
 pub fn is_literal(name: &[u8]) -> bool {
@@ -355,37 +440,37 @@ pub fn is_literal(name: &[u8]) -> bool {
     }
 }
 
-impl<'a> Node<&'a [u8]> {
-    pub fn parse(s: &'a [u8], path: &str) ->(Vec<Self>, Vec<String>) {
+impl Node {
+    pub fn parse(s: &[u8], path: &str) ->(Vec<Self>, Vec<String>) {
         Node::parse_tokens(Lexer::new(&s, Loc::from(path)))
     }
 
-    fn parse_tokens<I>(tokens: I) -> (Vec<Self>, Vec<String>)
+    fn parse_tokens<'a, I>(tokens: I) -> (Vec<Self>, Vec<String>)
         where I: Iterator<Item=(Loc, Token<'a>)>
     {
         let mut errs = Vec::new();
         let mut stack = Vec::new();
         let mut top = Elem {
-            name: &[] as &[u8],
+            name: Blob::default(),
             delim: Delim::Parenthesis,
             children: Vec::new(),
             loc: Default::default(),
         };
         for token in tokens {
-            let esc = is_literal(top.name);
+            let esc = is_literal(&top.name);
             match token {
                 (_, Token::Chunk(s)) => {
-                    top.children.push(Node::Text(s));
+                    top.children.push(Node::from(s));
                 }
                 (loc, Token::Tag(word, delim)) => match delim {
-                    _ if esc && top.name != word => {
-                        top.children.push(Node::Text(word));
-                        top.children.push(Node::Text(delim.as_bytes()));
+                    _ if esc && top.name.as_bytes() != word => {
+                        top.children.push(Node::from(word));
+                        top.children.push(Node::from(delim.as_bytes()));
                     }
                     Delimiter(Open, dtype) => {
                         stack.push(top);
                         top = Elem {
-                            name: word,
+                            name: Blob::from(word),
                             delim: dtype,
                             children: Vec::new(),
                             loc: loc,
@@ -393,7 +478,7 @@ impl<'a> Node<&'a [u8]> {
                     }
                     Delimiter(Close, dtype) => {
                         if !esc {
-                            top.children.push(Node::Text(word));
+                            top.children.push(Node::from(word));
                         }
                         if top.delim != dtype {
                             let d = Delimiter(Open, top.delim);
@@ -401,7 +486,7 @@ impl<'a> Node<&'a [u8]> {
                                 "{}: ‘{}’ doesn’t close ‘{}{}’ at {}",
                                 loc,
                                 String::from_utf8_lossy(delim.as_bytes()),
-                                debug_utf8(top.name),
+                                debug_utf8(&top.name),
                                 String::from_utf8_lossy(d.as_bytes()),
                                 top.loc));
                             top.children.push(escape_delim(d));
@@ -415,7 +500,7 @@ impl<'a> Node<&'a [u8]> {
                                     errs.push(format!(
                                         "{}: ‘{}’ doesn’t close anything",
                                         loc, String::from_utf8_lossy(d)));
-                                    top.children.push(Node::Text(d));
+                                    top.children.push(Node::from(d));
                                 }
                                 Some(mut new_top) => {
                                     new_top.children.push(Node::Elem(Elem {
@@ -438,8 +523,8 @@ impl<'a> Node<&'a [u8]> {
                 errs.push(format!(
                     "{}: ‘{}{}’ was never closed",
                     top.loc,
-                    String::from_utf8_lossy(top.name),
-                    String::from_utf8_lossy(d)));
+                    String::from_utf8_lossy(&top.name),
+                    String::from_utf8_lossy(&d)));
                 &mut root.children
             }
             None => &mut top.children,
@@ -459,6 +544,6 @@ pub fn load_file(path: &str) -> Vec<u8> {
     s
 }
 
-pub fn render_doc(nodes: &[Node<&[u8]>]) -> Vec<u8> {
+pub fn render_doc(nodes: &[Node]) -> Vec<u8> {
     write_to_vec(nodes, &mut NodeWriteState::Clean)
 }

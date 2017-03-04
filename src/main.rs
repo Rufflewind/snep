@@ -2,7 +2,7 @@ extern crate snep;
 use std::io;
 use snep::parser::{self, Node, Elem};
 
-fn write_children<W: io::Write>(f: &mut W, elem: &Elem<&[u8]>)
+fn write_children<W: io::Write>(f: &mut W, elem: &Elem)
                                 -> io::Result<()> {
     for child in &elem.children {
         write_html(child, f)?;
@@ -10,15 +10,15 @@ fn write_children<W: io::Write>(f: &mut W, elem: &Elem<&[u8]>)
     Ok(())
 }
 
-fn write_html<W: io::Write>(node: &Node<&[u8]>, f: &mut W) -> io::Result<()> {
+fn write_html<W: io::Write>(node: &Node, f: &mut W) -> io::Result<()> {
     // TODO: implement HTML escaping and sanity checks!
     use parser::{WriteTo, is_literal};
     match node {
-        &Node::Text(t) => {
+        &Node::Text(ref t) => {
             f.write_all(t)?;
         }
         &Node::Elem(ref elem) => {
-            let name = elem.name;
+            let name = &elem.name;
             if is_literal(name) {
                 write_children(f, elem)?;
             } else if name.is_empty() || name.last() == Some(&b'=') {
@@ -26,7 +26,7 @@ fn write_html<W: io::Write>(node: &Node<&[u8]>, f: &mut W) -> io::Result<()> {
                 elem.delim.open().as_bytes().write_to(f, &mut ())?;
                 write_children(f, elem)?;
                 elem.delim.close().as_bytes().write_to(f, &mut ())?;
-            } else if name == b"+" {
+            } else if name.as_bytes() == b"+" {
                 for child in &elem.children {
                     match child {
                         &Node::Elem(ref elem) => {
