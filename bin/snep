@@ -133,8 +133,13 @@ def install_required_snips(doc, get_snippet, purge, snips_indices, sort):
                              .format(dep))
             sys.stderr.flush()
     mods = get_mods(get_snippet, deps)
-    doc = doc.replace_element_children(
-        "imports", [snep.Text("import {0}\n".format(mod)) for mod in mods])
+    if "imports" in doc.unique_elements:
+        doc = doc.replace_element_children(
+            "imports", [snep.Text("import {0}\n".format(mod)) for mod in mods])
+    elif mods:
+        raise ValueError("{0}: doc has imports, but 'imports' "
+                         "element is missing".format(doc.origin.filename))
+
     graph = dict((dep, [x for x in
                         filter_away_mods(get_snippet, get_snippet(dep).requires)])
                  for dep in filter_away_mods(get_snippet, deps))
@@ -227,8 +232,10 @@ def sync(fn1, fn2, purge, dry_run, syntax, direction, sort):
     # to avoid accidental loss of data
     check_for_garbage(snips1)
     check_for_garbage(snips2)
-    check_for_nonimports(doc1.get_element("imports"))
-    check_for_nonimports(doc2.get_element("imports"))
+    if "imports" in doc1.unique_elements:
+        check_for_nonimports(doc1.get_element("imports"))
+    if "imports" in doc2.unique_elements:
+        check_for_nonimports(doc2.get_element("imports"))
     nonunique_element_name = find_nonunique_element_name(snips1)
     if nonunique_element_name is not None:
         raise ValueError("{0}: non-unique snippet: {1}"
