@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 from __future__ import print_function, unicode_literals
-import functools, os, re, sys
+import functools, os, re, shutil, sys
 SNEP_LIB_PATH = os.path.realpath(
     os.path.join(os.path.dirname(os.path.realpath(__file__)), "../lib"))
 sys.path.insert(0, SNEP_LIB_PATH)
@@ -302,6 +302,7 @@ def sync(fn1, fn2, purge, dry_run, syntax, direction, sort):
     utils.rename(fn1, fn1 + ".orig")
     try:
         utils.save_file(fn1, doc1.render())
+        shutil.copymode(fn1 + ".orig", fn1)
     except:
         utils.rename(fn1 + ".orig", fn1)
         raise
@@ -309,6 +310,7 @@ def sync(fn1, fn2, purge, dry_run, syntax, direction, sort):
     utils.rename(fn2, fn2 + ".orig")
     try:
         utils.save_file(fn2, doc2.render())
+        shutil.copymode(fn2 + ".orig", fn2)
     except:
         utils.rename(fn2 + ".orig", fn2)
         raise
